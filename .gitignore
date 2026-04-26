@@ -1,0 +1,45 @@
+# Binaries
+*.exe
+bin/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# Claude Code
+.claude/
+
+# Sample documents
+*.pdf
+*.docx
+~$*
+
+# Output directories
+images/
+test_images/
+output_images/
+
+# Python
+__pycache__/
+*.pyc
+venv/
+.venv/
+
+# Debug / temp files
+d.txt
+debug_*.txt
+debug_*.md
+full_markdown.md
+markdown_check.txt
+test_markdown.md
+output.json
+
+# Node
+node_modules/
+package.json
+package-lock.json
+
+# OS
+.DS_Store
+Thumbs.db
