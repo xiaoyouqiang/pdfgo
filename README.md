@@ -174,4 +174,4 @@ PDF file
 
 ## License
 
-GPL v3
+BSL
