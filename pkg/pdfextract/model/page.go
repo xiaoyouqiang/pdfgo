@@ -112,6 +112,12 @@ type ContentItem struct {
 	Image *ImageInfo  // 当 Type == "image" 时的图片指针
 }
 
+// ExtractionResult 表示整个 PDF 文档的提取结果。
+type ExtractionResult struct {
+	Title string // 文档标题（从第一页居中文本中识别）
+	Pages []Page // 所有页面的提取结果
+}
+
 // Page 表示一页 PDF 的提取结果。
 type Page struct {
 	PageNum   int          // 页码（从 1 开始）

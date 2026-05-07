@@ -53,7 +53,6 @@ func PagesToMarkdown(pages []model.Page) string {
 				}
 			case "table":
 				// 渲染表格为 Markdown 管道表格
-				println("______________________________________________________________")
 				writeTableMarkdown(&sb, item.Table)
 			case "image":
 				// 渲染图片为 Markdown 图片链接
@@ -370,7 +369,7 @@ func writeTableMarkdown(sb *strings.Builder, tbl *model.Table) {
 // 将换行替换为空格，管道符进行转义以避免破坏表格格式。
 func cellText(cell model.Cell) string {
 	t := strings.TrimSpace(cell.Text)
-	t = strings.ReplaceAll(t, "\n", " ") // 换行替换为空格
+	t = strings.ReplaceAll(t, "\n", " ")  // 换行替换为空格
 	t = strings.ReplaceAll(t, "|", "\\|") // 转义管道符
 	return t
 }

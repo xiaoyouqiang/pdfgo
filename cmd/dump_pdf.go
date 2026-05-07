@@ -23,11 +23,12 @@ func main() {
 		ExtractTable: true,
 		ExtractImage: true,
 	})
-	pages, err := e.ExtractFile(path)
+	result, err := e.ExtractFile(path)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
+	pages := result.Pages
 
 	if outputDir != "" {
 		if err := pdfextract.SaveImages(pages, outputDir, "img_"); err != nil {

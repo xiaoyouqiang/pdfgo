@@ -12,6 +12,7 @@
 - **智能分段** - 在句子边界处分段，保护表格和链接不被截断
 - **目录过滤** - 可选过滤 PDF 目录条目（点线引导格式）
 - **Word 文档支持** - 同时支持 `.docx` 文件的解析和分段
+- **文档标题识别** - 从第一页首个居中且非页眉页脚的文本行识别文档标题
 - **Markdown 输出** - 将 PDF 内容转换为结构化 Markdown
 
 ## 安装
@@ -79,11 +80,12 @@ func extractPDF(path string) {
         ExtractTable: true,
         ExtractImage: false,
     })
-    pages, err := e.ExtractFile(path)
+    result, err := e.ExtractFile(path)
     if err != nil {
         panic(err)
     }
-    markdown := pdfextract.PagesToMarkdown(pages)
+    fmt.Println("文档标题:", result.Title)
+    markdown := pdfextract.PagesToMarkdown(result.Pages)
     fmt.Println(markdown)
 }
 

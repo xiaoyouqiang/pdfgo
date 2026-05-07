@@ -10,8 +10,8 @@
 // 典型用法：
 //
 //	e := pdfextract.NewExtractor(pdfextract.ExtractionOptions{ExtractText: true, ExtractTable: true})
-//	pages, _ := e.ExtractFile("input.pdf")
-//	markdown := pdfextract.PagesToMarkdown(pages)
+//	result, _ := e.ExtractFile("input.pdf")
+//	markdown := pdfextract.PagesToMarkdown(result.Pages)
 package pdfextract
 
 import (
@@ -22,23 +22,23 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
-	"github.com/xiaoyouqiang/pdfgo/pkg/pdfextract/font"
-	"github.com/xiaoyouqiang/pdfgo/pkg/pdfextract/interpret"
-	"github.com/xiaoyouqiang/pdfgo/pkg/pdfextract/layout"
-	"github.com/xiaoyouqiang/pdfgo/pkg/pdfextract/table"
-	"github.com/xiaoyouqiang/pdfgo/pkg/pdfextract/model"
 	"github.com/pdfcpu/pdfcpu/pkg/api"
 	pdfcpu "github.com/pdfcpu/pdfcpu/pkg/pdfcpu"
 	pdfcpuModel "github.com/pdfcpu/pdfcpu/pkg/pdfcpu/model"
 	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/types"
+	"github.com/xiaoyouqiang/pdfgo/pkg/pdfextract/font"
+	"github.com/xiaoyouqiang/pdfgo/pkg/pdfextract/interpret"
+	"github.com/xiaoyouqiang/pdfgo/pkg/pdfextract/layout"
+	"github.com/xiaoyouqiang/pdfgo/pkg/pdfextract/model"
+	"github.com/xiaoyouqiang/pdfgo/pkg/pdfextract/table"
 )
 
 // ExtractionOptions 配置 PDF 提取行为，控制提取哪些类型的内容。
 type ExtractionOptions struct {
-	ExtractText  bool   // 是否提取文本内容
-	ExtractTable bool   // 是否检测和提取表格
-	ExtractImage bool   // 是否提取图片
-	Pages        []int  // 指定提取的页码（nil 表示所有页面）
+	ExtractText  bool  // 是否提取文本内容
+	ExtractTable bool  // 是否检测和提取表格
+	ExtractImage bool  // 是否提取图片
+	Pages        []int // 指定提取的页码（nil 表示所有页面）
 }
 
 // DefaultExtractionOptions 返回默认提取选项（仅提取文本）。
@@ -61,8 +61,8 @@ func NewExtractor(opts ExtractionOptions) *Extractor {
 	return &Extractor{opts: opts}
 }
 
-// ExtractFile 从 PDF 文件中提取内容，返回每页的结构化数据。
-func (e *Extractor) ExtractFile(path string) ([]model.Page, error) {
+// ExtractFile 从 PDF 文件中提取内容，返回包含文档标题和每页结构化数据的结果。
+func (e *Extractor) ExtractFile(path string) (*model.ExtractionResult, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, fmt.Errorf("open file: %w", err)
@@ -72,7 +72,7 @@ func (e *Extractor) ExtractFile(path string) ([]model.Page, error) {
 }
 
 // ExtractBytes 从 PDF 字节数据中提取内容。
-func (e *Extractor) ExtractBytes(data []byte) ([]model.Page, error) {
+func (e *Extractor) ExtractBytes(data []byte) (*model.ExtractionResult, error) {
 	return e.ExtractReader(strings.NewReader(string(data)))
 }
 
@@ -81,7 +81,7 @@ func (e *Extractor) ExtractBytes(data []byte) ([]model.Page, error) {
 //  1. 使用 pdfcpu 读取并验证 PDF 结构
 //  2. 遍历指定页面（或所有页面），逐页提取内容
 //  3. 返回每页的结构化数据
-func (e *Extractor) ExtractReader(r io.ReadSeeker) ([]model.Page, error) {
+func (e *Extractor) ExtractReader(r io.ReadSeeker) (*model.ExtractionResult, error) {
 	// 使用宽松验证模式，兼容不完全规范的 PDF 文件
 	conf := pdfcpuModel.NewDefaultConfiguration()
 	conf.ValidationMode = pdfcpuModel.ValidationRelaxed
@@ -124,7 +124,14 @@ func (e *Extractor) ExtractReader(r io.ReadSeeker) ([]model.Page, error) {
 		}
 		pages = append(pages, *page)
 	}
-	return pages, nil
+
+	// 从第一页居中文本中识别文档标题
+	title := detectTitle(pages)
+
+	return &model.ExtractionResult{
+		Title: title,
+		Pages: pages,
+	}, nil
 }
 
 // extractPage 提取单页 PDF 的内容。
@@ -157,8 +164,8 @@ func (e *Extractor) extractPage(ctx *pdfcpuModel.Context, pageNum int) (*model.P
 		// 空白页面，直接返回基本信息
 		return &model.Page{
 			PageNum: pageNum,
-			Width:  width,
-			Height: height,
+			Width:   width,
+			Height:  height,
 		}, nil
 	}
 
@@ -614,4 +621,96 @@ func SaveImages(pages []model.Page, outputDir string, prefix string) error {
 		}
 	}
 	return nil
+}
+
+// detectTitle 从第一页顶部文本中识别文档标题。
+//
+// 识别策略：
+//  1. 统计跨页重复出现的文本行，识别为页眉/页脚
+//  2. 取第一页按阅读顺序排列的第一个非页眉页脚的非空文本行
+//  3. 判断该行是否居中（行中心 X 坐标接近页面中心，容差为页面宽度的 10%）
+//  4. 如果居中，则认为该行是文档标题；否则认为文档没有标题
+func detectTitle(pages []model.Page) string {
+	if len(pages) == 0 {
+		return ""
+	}
+
+	firstPage := pages[0]
+	if len(firstPage.TextBoxes) == 0 {
+		return ""
+	}
+
+	// 构建页眉页脚集合：统计每条规范化文本出现在多少个不同页面上
+	headerFooterSet := buildHeaderFooterSet(pages)
+
+	pageMidX := firstPage.Width / 2
+	tolerance := firstPage.Width * 0.10 // 居中容差：页面宽度的 10%
+
+	// 取第一个非页眉页脚的非空文本行
+	for _, tb := range firstPage.TextBoxes {
+		for _, line := range tb.Lines {
+			text := strings.TrimSpace(line.Text())
+			if text == "" {
+				continue
+			}
+			// 跳过页眉页脚
+			if headerFooterSet[normalizeTitleText(text)] {
+				continue
+			}
+			// 找到第一个有效行，判断是否居中
+			lineMidX := (line.BBox.X0 + line.BBox.X1) / 2
+			if math.Abs(lineMidX-pageMidX) <= tolerance {
+				return text
+			}
+			// 第一个有效行不居中，说明文档没有标题
+			return ""
+		}
+	}
+	return ""
+}
+
+// buildHeaderFooterSet 统计跨页重复出现的文本行，返回页眉页脚文本集合。
+// 出现在 >= max(3, 页数/2) 个页面上的文本行被认为是页眉或页脚。
+func buildHeaderFooterSet(pages []model.Page) map[string]bool {
+	set := make(map[string]bool)
+	if len(pages) < 3 {
+		return set
+	}
+
+	threshold := len(pages) / 2
+	if threshold < 3 {
+		threshold = 3
+	}
+
+	linePageCount := make(map[string]int)
+	for _, page := range pages {
+		seen := make(map[string]bool)
+		for _, tb := range page.TextBoxes {
+			for _, line := range tb.Lines {
+				norm := normalizeTitleText(line.Text())
+				if norm != "" && !seen[norm] {
+					linePageCount[norm]++
+					seen[norm] = true
+				}
+			}
+		}
+	}
+
+	for norm, count := range linePageCount {
+		if count >= threshold {
+			set[norm] = true
+		}
+	}
+	return set
+}
+
+// normalizeTitleText 移除所有空白字符，用于文本比较。
+func normalizeTitleText(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		if r != ' ' && r != '\n' && r != '\r' && r != '\t' {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }

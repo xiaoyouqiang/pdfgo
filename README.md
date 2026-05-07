@@ -12,6 +12,7 @@ A Go library and CLI tool for extracting content from PDF documents and intellig
 - **Smart Splitting** - Splits content at sentence boundaries while preserving tables and links
 - **TOC Filtering** - Optionally filters PDF table-of-contents entries (dot-leader format)
 - **Word Document Support** - Also supports `.docx` parsing and splitting
+- **Document Title Detection** - Identifies the document title from the first centered text line on page 1, excluding headers/footers
 - **Markdown Output** - Converts PDF content to well-structured Markdown
 
 ## Installation
@@ -79,11 +80,12 @@ func extractPDF(path string) {
         ExtractTable: true,
         ExtractImage: false,
     })
-    pages, err := e.ExtractFile(path)
+    result, err := e.ExtractFile(path)
     if err != nil {
         panic(err)
     }
-    markdown := pdfextract.PagesToMarkdown(pages)
+    fmt.Println("Title:", result.Title)
+    markdown := pdfextract.PagesToMarkdown(result.Pages)
     fmt.Println(markdown)
 }
 
