@@ -11,7 +11,6 @@ package interpret
 import (
 	"errors"
 	"fmt"
-	"regexp"
 	"strconv"
 	"strings"
 	"unicode"
@@ -143,13 +142,8 @@ func (s *Scanner) Next() (Token, error) {
 			s.pos++
 		}
 		str := string(s.data[start : s.pos-1])
-		// 基本的反转义处理
-		str = strings.ReplaceAll(str, "\\n", "\n")
-		str = strings.ReplaceAll(str, "\\r", "\r")
-		str = strings.ReplaceAll(str, "\\t", "\t")
-		str = strings.ReplaceAll(str, "\\(", "(")
-		str = strings.ReplaceAll(str, "\\)", ")")
-		str = strings.ReplaceAll(str, "\\\\", "\\")
+		// 使用逐字符反转义，避免 ReplaceAll 的顺序问题
+		str = unescapeLiteral(str)
 		return Token{Type: Literal, Value: str}, nil
 
 	case '<':
@@ -166,7 +160,13 @@ func (s *Scanner) Next() (Token, error) {
 		}
 		s.pos++ // 跳过 >
 		hex := string(s.data[start:s.pos-1])
-		hex = strings.ReplaceAll(hex, " ", "")
+		// 移除所有空白字符（空格、换行、回车、制表符等 PDF 规范允许的分隔符）
+		hex = strings.Map(func(r rune) rune {
+			if r == ' ' || r == '\n' || r == '\r' || r == '\t' || r == '\f' {
+				return -1
+			}
+			return r
+		}, hex)
 		// 奇数长度时补零
 		if len(hex)%2 != 0 {
 			hex += "0"
@@ -216,6 +216,64 @@ func (s *Scanner) peek() byte {
 	return 0
 }
 
+// unescapeLiteral 按顺序处理 PDF 字面量字符串的转义序列。
+// 使用逐字符处理避免 ReplaceAll 的顺序依赖问题。
+func unescapeLiteral(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	i := 0
+	for i < len(s) {
+		if s[i] == '\\' && i+1 < len(s) {
+			switch s[i+1] {
+			case 'n':
+				b.WriteByte('\n')
+				i += 2
+			case 'r':
+				b.WriteByte('\r')
+				i += 2
+			case 't':
+				b.WriteByte('\t')
+				i += 2
+			case 'b':
+				b.WriteByte('\b')
+				i += 2
+			case 'f':
+				b.WriteByte('\f')
+				i += 2
+			case '(':
+				b.WriteByte('(')
+				i += 2
+			case ')':
+				b.WriteByte(')')
+				i += 2
+			case '\\':
+				b.WriteByte('\\')
+				i += 2
+			default:
+				// 八进制转义 \ddd（1-3 位八进制数字）
+				if s[i+1] >= '0' && s[i+1] <= '7' {
+					val := 0
+					j := i + 1
+					for j < len(s) && j < i+4 && s[j] >= '0' && s[j] <= '7' {
+						val = val*8 + int(s[j]-'0')
+						j++
+					}
+					b.WriteByte(byte(val))
+					i = j
+				} else {
+					// 未知转义，忽略反斜杠
+					b.WriteByte(s[i+1])
+					i += 2
+				}
+			}
+		} else {
+			b.WriteByte(s[i])
+			i++
+		}
+	}
+	return b.String()
+}
+
 // scanNumber 扫描一个完整的数字（支持符号、小数点和科学计数法）
 func (s *Scanner) scanNumber() (Token, error) {
 	start := s.pos
@@ -251,9 +309,6 @@ func (s *Scanner) scanNumber() (Token, error) {
 	}
 	return Token{Type: Number, Value: val}, nil
 }
-
-// operatorPattern 用于匹配 PDF 操作符的正则表达式
-var operatorPattern = regexp.MustCompile(`^[A-Za-z\'\"\*]+|^[0-9.#+/A-Za-z]+$`)
 
 // scanOperator 扫描一个操作符名称
 func (s *Scanner) scanOperator() (Token, error) {

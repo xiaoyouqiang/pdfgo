@@ -88,7 +88,7 @@ func FilterHeadersFooters(pages []model.Page) {
 		seen := make(map[string]bool) // 每页内去重，避免同页多次出现被重复计数
 		for _, tb := range page.TextBoxes {
 			for _, line := range tb.Lines {
-				norm := normalizeText(line.Text())
+				norm := normalizeTitleText(line.Text())
 				if norm != "" && !seen[norm] {
 					linePageCount[norm]++
 					seen[norm] = true
@@ -103,7 +103,7 @@ func FilterHeadersFooters(pages []model.Page) {
 		for _, tb := range pages[pi].TextBoxes {
 			var keep []model.TextLine
 			for _, line := range tb.Lines {
-				norm := normalizeText(line.Text())
+				norm := normalizeTitleText(line.Text())
 				if linePageCount[norm] < threshold {
 					keep = append(keep, line)
 				}
@@ -115,18 +115,6 @@ func FilterHeadersFooters(pages []model.Page) {
 		}
 		pages[pi].TextBoxes = filtered
 	}
-}
-
-// normalizeText 移除所有空白字符，用于文本比较。
-// 使得多行版本和单行版本的相同文本能够匹配。
-func normalizeText(s string) string {
-	var b strings.Builder
-	for _, r := range s {
-		if r != ' ' && r != '\n' && r != '\r' && r != '\t' {
-			b.WriteRune(r)
-		}
-	}
-	return b.String()
 }
 
 // headingTier 表示一个字体大小对应的标题层级。
@@ -177,7 +165,7 @@ func buildHeadingTiers(pages []model.Page, bodySize float64) []headingTier {
 						cjkCount++
 					}
 				}
-				if wordCount > maxWords && cjkCount > maxWords {
+				if wordCount > maxWords || cjkCount > maxWords {
 					continue
 				}
 
@@ -263,11 +251,11 @@ func findBodyFontSize(pages []model.Page) float64 {
 	if len(counts) == 0 {
 		return 12.0
 	}
-	// 找出现次数最多的字体大小（众数）
+	// 找出现次数最多的字体大小（众数）；次数相同时选择较小的字号（更可能是正文）
 	best := 0.0
 	bestN := 0
 	for sz, n := range counts {
-		if n > bestN || (n == bestN && sz > best) {
+		if n > bestN || (n == bestN && sz < best) {
 			best = sz
 			bestN = n
 		}
@@ -391,31 +379,51 @@ func writeImageMarkdown(sb *strings.Builder, img *model.ImageInfo, pageIdx int) 
 
 // buildTextBoxMap 构建文本框的查找映射表。
 // 使用边界框的量化值作为键，支持快速查找。
-func buildTextBoxMap(tbs []model.TextBox) map[[4]int]*model.TextBox {
-	m := make(map[[4]int]*model.TextBox, len(tbs))
+// 当多个文本框量化到同一键时，保留所有候选以供 findTextBox 选择最佳匹配。
+func buildTextBoxMap(tbs []model.TextBox) map[[4]int][]*model.TextBox {
+	m := make(map[[4]int][]*model.TextBox, len(tbs))
 	for i := range tbs {
 		key := bboxKey(tbs[i].BBox)
-		m[key] = &tbs[i]
+		m[key] = append(m[key], &tbs[i])
 	}
 	return m
 }
 
 // findTextBox 在映射表中查找与指定边界框对应的文本框。
 // 先尝试精确匹配，找不到则使用模糊匹配（误差 < 2）。
-func findTextBox(tbMap map[[4]int]*model.TextBox, bbox model.Rect) *model.TextBox {
-	// 精确匹配
+// 当有多个候选时，选择面积最接近的。
+func findTextBox(tbMap map[[4]int][]*model.TextBox, bbox model.Rect) *model.TextBox {
 	key := bboxKey(bbox)
-	if tb, ok := tbMap[key]; ok {
-		return tb
+	targetArea := bbox.Area()
+
+	// 辅助函数：从候选列表中选择面积最接近的文本框
+	pickBest := func(candidates []*model.TextBox) *model.TextBox {
+		if len(candidates) == 1 {
+			return candidates[0]
+		}
+		best := candidates[0]
+		bestDiff := math.Abs(best.BBox.Area() - targetArea)
+		for _, c := range candidates[1:] {
+			diff := math.Abs(c.BBox.Area() - targetArea)
+			if diff < bestDiff {
+				best = c
+				bestDiff = diff
+			}
+		}
+		return best
+	}
+
+	// 精确匹配
+	if candidates, ok := tbMap[key]; ok {
+		return pickBest(candidates)
 	}
 	// 模糊匹配：遍历所有键，找到最接近的
-	for k, tb := range tbMap {
-		target := bboxKey(bbox)
-		if math.Abs(float64(k[0]-target[0])) < 2 &&
-			math.Abs(float64(k[1]-target[1])) < 2 &&
-			math.Abs(float64(k[2]-target[2])) < 2 &&
-			math.Abs(float64(k[3]-target[3])) < 2 {
-			return tb
+	for k, candidates := range tbMap {
+		if math.Abs(float64(k[0]-key[0])) < 2 &&
+			math.Abs(float64(k[1]-key[1])) < 2 &&
+			math.Abs(float64(k[2]-key[2])) < 2 &&
+			math.Abs(float64(k[3]-key[3])) < 2 {
+			return pickBest(candidates)
 		}
 	}
 	return nil

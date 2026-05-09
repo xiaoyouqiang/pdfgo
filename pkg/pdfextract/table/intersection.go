@@ -26,11 +26,7 @@ func snapKey(x, y float64) pointKey {
 }
 
 // FindIntersections 查找所有水平边和垂直边的交叉点。
-// 对每条垂直边，检查它是否与每条水平边相交：
-//   - 垂直边的 X 坐标在水平边的 X 范围内
-//   - 水平边的 Y 坐标在垂直边的 Y 范围内
-//
-// 相近的交叉点会被合并（通过 snapKey 量化），并累积关联的所有边索引。
+// 使用排序+二分查找优化：按 X 坐标排序水平边后，对每条垂直边只检查 X 范围内的水平边。
 func FindIntersections(edges []Edge, xTol, yTol float64) []Intersection {
 	type indexedEdge struct {
 		Edge  Edge
@@ -46,6 +42,11 @@ func FindIntersections(edges []Edge, xTol, yTol float64) []Intersection {
 		}
 	}
 
+	// 按 X0 排序水平边，用于二分查找
+	sort.Slice(hEdges, func(i, j int) bool {
+		return hEdges[i].Edge.X0 < hEdges[j].Edge.X0
+	})
+
 	// 使用量化键聚合并去重交叉点
 	type acc struct {
 		pt     model.Point
@@ -54,18 +55,24 @@ func FindIntersections(edges []Edge, xTol, yTol float64) []Intersection {
 	}
 	m := make(map[pointKey]*acc)
 
-	// 遍历所有垂直边和水平边的组合
+	// 对每条垂直边，使用二分查找只检查 X 范围内的水平边
 	for _, v := range vEdges {
-		for _, h := range hEdges {
-			vx := v.Edge.X0 // 垂直边的 X 坐标
-			hy := h.Edge.Y0 // 水平边的 Y 坐标
+		vx := v.Edge.X0 // 垂直边的 X 坐标
+		// 二分查找：找到第一条 X0 > vx+xTol 的水平边，之前的都可能是候选
+		hi := sort.Search(len(hEdges), func(i int) bool {
+			return hEdges[i].Edge.X0 > vx+xTol
+		})
+		for j := 0; j < hi; j++ {
+			h := hEdges[j]
+			hy := h.Edge.Y0
 
-			// 检查交叉条件
-			if vx < h.Edge.X0-xTol || vx > h.Edge.X1+xTol {
-				continue // 垂直边 X 不在水平边范围内
+			// 检查垂直边 X 是否在水平边 X 范围内
+			if vx < h.Edge.X0-xTol {
+				continue
 			}
+			// 检查水平边 Y 是否在垂直边 Y 范围内
 			if hy < v.Edge.Y0-yTol || hy > v.Edge.Y1+yTol {
-				continue // 水平边 Y 不在垂直边范围内
+				continue
 			}
 
 			// 记录交叉点

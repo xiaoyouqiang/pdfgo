@@ -12,7 +12,7 @@ import (
 
 // Params 控制布局分析的行为参数。
 type Params struct {
-	CharMargin float64 // 字符间距容差（当前未使用）
+	CharMargin float64 // 字符间距容差（已弃用，当前未使用）
 	LineMargin float64 // 行间距容差倍数，控制相邻行是否归入同一文本框
 	WordMargin float64 // 词间距容差倍数，控制字符之间何时插入空格
 }

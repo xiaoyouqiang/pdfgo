@@ -27,7 +27,11 @@ func (l *TextLine) Text() string {
 	if len(l.Chars) == 0 {
 		return ""
 	}
-	b := make([]byte, 0, len(l.Chars))
+	sz := 0
+	for _, c := range l.Chars {
+		sz += len(c.Text)
+	}
+	b := make([]byte, 0, sz)
 	for _, c := range l.Chars {
 		b = append(b, c.Text...)
 	}
@@ -128,19 +132,6 @@ type Page struct {
 	Images    []ImageInfo  // 该页上的所有图片
 }
 
-// visualTopY 返回指定内容项的视觉顶部 Y 坐标。
-// 对于文本框，使用第一个字符的 Y1（而非文本框的 BBox），
-// 因为布局分析器可能会扩大文本框的边界框，导致定位不准确。
-func (p *Page) visualTopY(idx int, item ContentItem) float64 {
-	if item.Type == "text" && idx < len(p.TextBoxes) {
-		tb := p.TextBoxes[idx]
-		if len(tb.Lines) > 0 && len(tb.Lines[0].Chars) > 0 {
-			return tb.Lines[0].Chars[0].BBox.Y1
-		}
-	}
-	return item.BBox.Y1
-}
-
 // ReadingOrder 将页面上的所有文本框、表格和图片按视觉阅读顺序排列。
 // 排序规则：从上到下（PDF 坐标系中 Y 值大的在上方），同高度则从左到右。
 func (p *Page) ReadingOrder() []ContentItem {
@@ -152,21 +143,23 @@ func (p *Page) ReadingOrder() []ContentItem {
 	var entries []entry
 
 	// 将所有文本框添加到排序列表
-	tbIdx := 0
 	for i := range p.TextBoxes {
+		tb := &p.TextBoxes[i]
 		it := ContentItem{
 			Type: "text",
-			BBox: p.TextBoxes[i].BBox,
-			Text: p.TextBoxes[i].Text(),
+			BBox: tb.BBox,
+			Text: tb.Text(),
 		}
 		// 使用第一个字符的精确 Y 坐标作为排序依据
-		y := p.visualTopY(tbIdx, it)
-		x := p.TextBoxes[i].BBox.X0
-		if len(p.TextBoxes[i].Lines) > 0 && len(p.TextBoxes[i].Lines[0].Chars) > 0 {
-			x = p.TextBoxes[i].Lines[0].Chars[0].BBox.X0
+		y := tb.BBox.Y1
+		if len(tb.Lines) > 0 && len(tb.Lines[0].Chars) > 0 {
+			y = tb.Lines[0].Chars[0].BBox.Y1
+		}
+		x := tb.BBox.X0
+		if len(tb.Lines) > 0 && len(tb.Lines[0].Chars) > 0 {
+			x = tb.Lines[0].Chars[0].BBox.X0
 		}
 		entries = append(entries, entry{item: it, y: y, x: x})
-		tbIdx++
 	}
 
 	// 将所有表格添加到排序列表

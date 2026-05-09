@@ -153,8 +153,12 @@ func (ci *ContentInterpreter) dispatch(op string, operands []Operand) {
 	case "\"":
 		// 设置间距、移动到下一行并显示字符串：" aw ac (string)
 		if len(operands) >= 3 {
-			ci.tState.Tw = operands[0].Value.(float64) // 词间距
-			ci.tState.Tc = operands[1].Value.(float64) // 字符间距
+			if v, ok := operands[0].Value.(float64); ok {
+				ci.tState.Tw = v // 词间距
+			}
+			if v, ok := operands[1].Value.(float64); ok {
+				ci.tState.Tc = v // 字符间距
+			}
 			ci.tState.NextLine()
 			if data, ok := toBytes(operands[2]); ok {
 				ci.showString(data)
@@ -329,7 +333,13 @@ func (ci *ContentInterpreter) showString(data []byte) {
 
 	// 计算组合缩放因子：页面空间位移 / 文本空间位移
 	pageSx := ctm[0]*tm[0] + ctm[2]*tm[1] // 水平方向缩放
-	pageSy := ctm[1]*tm[2] + ctm[3]*tm[3] // 垂直方向缩放
+	pageSy := ctm[1]*tm[1] + ctm[3]*tm[3] // 垂直方向缩放
+
+	// 处理旋转文本：当 pageSx 接近 0 时，使用组合缩放的绝对值之和作为字符尺寸
+	charScale := math.Abs(pageSx) + math.Abs(pageSy)
+	if charScale == 0 {
+		charScale = 1
+	}
 
 	for i, r := range runes {
 		adv := widths[i]
@@ -341,9 +351,16 @@ func (ci *ContentInterpreter) showString(data []byte) {
 		x, y := ci.gState.Transform(ci.tState.Tm[4], ci.tState.Tm[5])
 
 		// 计算字符在页面空间中的宽度和高度
-		displacementTx := adv * effSize          // 文本空间中的前进距离
-		charWidthPage := pageSx * displacementTx // 页面空间中的字符宽度
-		charHeightPage := math.Abs(pageSy) * effSize // 页面空间中的字符高度
+		displacementTx := adv * effSize // 文本空间中的前进距离
+		charWidthPage := pageSx * displacementTx
+		if math.Abs(charWidthPage) < 0.01 {
+			// 旋转文本：pageSx 接近 0，使用组合缩放估算尺寸
+			charWidthPage = charScale * displacementTx
+		}
+		charHeightPage := math.Abs(pageSy) * effSize
+		if charHeightPage < 0.01 {
+			charHeightPage = charScale * effSize
+		}
 
 		// 估算字符的边界框（基于基线位置和大致高度比例）
 		bbox := model.Rect{

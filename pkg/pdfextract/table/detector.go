@@ -27,6 +27,7 @@ type TableSettings struct {
 	MinCellWidth     float64 // 最小单元格宽度
 	MinCellHeight    float64 // 最小单元格高度
 	MinTableCells    int     // 表格最少包含的单元格数
+	MinRectHeight    float64 // 矩形最小高度：低于此值的矩形视为水平分隔线而非单元格
 	PageWidth        float64 // 页面宽度（用于过滤全页矩形）
 	PageHeight       float64 // 页面高度（用于过滤全页矩形）
 }
@@ -42,6 +43,7 @@ func DefaultSettings() TableSettings {
 		MinCellWidth:     5.0,
 		MinCellHeight:    5.0,
 		MinTableCells:    2,
+		MinRectHeight:    1.0,
 	}
 }
 
@@ -80,8 +82,8 @@ func filterPageRects(rects []model.Rect, settings TableSettings) []model.Rect {
 		if pageArea > 0 && r.Area() > pageArea*0.5 {
 			continue
 		}
-		// 跳过非常细的水平分隔线
-		if r.Height() < 2 {
+		// 跳过非常细的水平分隔线（高度低于阈值）
+		if r.Height() < settings.MinRectHeight {
 			continue
 		}
 		filtered = append(filtered, r)

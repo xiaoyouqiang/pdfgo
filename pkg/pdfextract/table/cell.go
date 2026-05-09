@@ -52,13 +52,16 @@ func BuildCells(intersections []Intersection) []model.Cell {
 			}
 		}
 
-		// 尝试组合上方-右方-下方交叉点形成单元格
+		// 对每个左上角交叉点，找最近的下方和右方交叉点组成最小单元格。
+		// 只取最近邻（最小矩形），避免生成重叠的跨行/跨列单元格导致
+		// 下游 buildTableFromCells 中单元格互相覆盖。
 		for _, bi := range below {
 			// 验证左边有垂直边连接
 			if !edgeConnects(intersections, i, bi) {
 				continue
 			}
-			cellFound := false
+			// 查找与当前下方点匹配的最近右方点
+			found := false
 			for _, ri := range right {
 				// 验证上边有水平边连接
 				if !edgeConnects(intersections, i, ri) {
@@ -80,7 +83,7 @@ func BuildCells(intersections []Intersection) []model.Cell {
 				if !edgeConnects(intersections, di, bi) {
 					continue
 				}
-				// 四条边都验证通过，创建单元格
+				// 四条边都验证通过，创建最小单元格
 				cells = append(cells, model.Cell{
 					BBox: model.Rect{
 						X0: pt.X,
@@ -89,11 +92,11 @@ func BuildCells(intersections []Intersection) []model.Cell {
 						Y1: intersections[bi].Point.Y,
 					},
 				})
-				cellFound = true
-				break
+				found = true
+				break // 取最近的右方点，形成最小单元格
 			}
-			if cellFound {
-				break
+			if found {
+				break // 取最近的下方点，形成最小单元格
 			}
 		}
 	}
@@ -221,28 +224,40 @@ func GroupCells(cells []model.Cell) []model.Table {
 // buildTableFromCells 从单元格列表构建表格结构。
 // 收集所有单元格的边界坐标，构建规则网格，并将单元格放入对应位置。
 func buildTableFromCells(cells []model.Cell, indices []int) model.Table {
-	// 收集所有不重复的 X 和 Y 坐标
-	xSet := make(map[float64]bool)
-	ySet := make(map[float64]bool)
+	const quantScale = 10.0 // 坐标量化精度
+
+	// 收集所有不重复的量化 X 和 Y 坐标
+	xSet := make(map[int]bool)
+	ySet := make(map[int]bool)
 	for _, idx := range indices {
-		xSet[cells[idx].BBox.X0] = true
-		xSet[cells[idx].BBox.X1] = true
-		ySet[cells[idx].BBox.Y0] = true
-		ySet[cells[idx].BBox.Y1] = true
+		xSet[int(math.Round(cells[idx].BBox.X0 * quantScale))] = true
+		xSet[int(math.Round(cells[idx].BBox.X1 * quantScale))] = true
+		ySet[int(math.Round(cells[idx].BBox.Y0 * quantScale))] = true
+		ySet[int(math.Round(cells[idx].BBox.Y1 * quantScale))] = true
 	}
 
-	// 排序得到列和行的边界
-	xs := sortedKeys(xSet)
-	ys := sortedKeys(ySet)
+	// 排序得到列和行的量化边界
+	xs := sortedIntKeys(xSet)
+	ys := sortedIntKeys(ySet)
 
-	// 构建坐标到索引的映射
-	xIndex := make(map[float64]int)
+	// 构建量化坐标到索引的映射
+	xIndex := make(map[int]int)
 	for i, x := range xs {
 		xIndex[x] = i
 	}
-	yIndex := make(map[float64]int)
+	yIndex := make(map[int]int)
 	for i, y := range ys {
 		yIndex[y] = i
+	}
+
+	// 量化坐标转回实际坐标
+	xCoords := make([]float64, len(xs))
+	for i, v := range xs {
+		xCoords[i] = float64(v) / quantScale
+	}
+	yCoords := make([]float64, len(ys))
+	for i, v := range ys {
+		yCoords[i] = float64(v) / quantScale
 	}
 
 	rows := len(ys) - 1
@@ -265,8 +280,8 @@ func buildTableFromCells(cells []model.Cell, indices []int) model.Table {
 	first := true
 	for _, idx := range indices {
 		c := cells[idx]
-		r := yIndex[c.BBox.Y0]
-		col := xIndex[c.BBox.X0]
+		r := yIndex[int(math.Round(c.BBox.Y0 * quantScale))]
+		col := xIndex[int(math.Round(c.BBox.X0 * quantScale))]
 		if r >= 0 && r < rows && col >= 0 && col < cols {
 			grid[r][col] = model.Cell{
 				BBox: c.BBox,
@@ -293,12 +308,12 @@ func buildTableFromCells(cells []model.Cell, indices []int) model.Table {
 	}
 }
 
-// sortedKeys 返回 map 中所有键的排序切片
-func sortedKeys(m map[float64]bool) []float64 {
-	keys := make([]float64, 0, len(m))
+// sortedIntKeys 返回 int map 中所有键的排序切片
+func sortedIntKeys(m map[int]bool) []int {
+	keys := make([]int, 0, len(m))
 	for k := range m {
 		keys = append(keys, k)
 	}
-	sort.Float64s(keys)
+	sort.Ints(keys)
 	return keys
 }

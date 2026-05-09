@@ -15,10 +15,12 @@
 package pdfextract
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"math"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/google/uuid"
@@ -27,6 +29,7 @@ import (
 	pdfcpuModel "github.com/pdfcpu/pdfcpu/pkg/pdfcpu/model"
 	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/types"
 	"github.com/xiaoyouqiang/pdfgo/pkg/pdfextract/font"
+	"github.com/xiaoyouqiang/pdfgo/pkg/pdfextract/internal/spatial"
 	"github.com/xiaoyouqiang/pdfgo/pkg/pdfextract/interpret"
 	"github.com/xiaoyouqiang/pdfgo/pkg/pdfextract/layout"
 	"github.com/xiaoyouqiang/pdfgo/pkg/pdfextract/model"
@@ -73,7 +76,7 @@ func (e *Extractor) ExtractFile(path string) (*model.ExtractionResult, error) {
 
 // ExtractBytes 从 PDF 字节数据中提取内容。
 func (e *Extractor) ExtractBytes(data []byte) (*model.ExtractionResult, error) {
-	return e.ExtractReader(strings.NewReader(string(data)))
+	return e.ExtractReader(bytes.NewReader(data))
 }
 
 // ExtractReader 从 io.ReadSeeker 中提取 PDF 内容。
@@ -361,25 +364,32 @@ func (e *Extractor) buildTextBoxes(chars []model.Char) []model.TextBox {
 // excludeTableChars 从字符列表中排除落在表格单元格内的字符，
 // 避免表格内容被重复包含在文本框中。
 func excludeTableChars(chars []model.Char, tables []model.Table) []model.Char {
+	// 构建单元格的空间索引
+	idx := spatial.NewIndex[model.Rect]()
+	for i := range tables {
+		for r := 0; r < tables[i].Rows; r++ {
+			for c := 0; c < tables[i].Cols; c++ {
+				bbox := tables[i].Cells[r][c].BBox
+				if !bbox.Empty() {
+					idx.Insert(bbox, bbox)
+				}
+			}
+		}
+	}
+
 	var filtered []model.Char
 	for _, ch := range chars {
 		// 使用字符边界框的中心点判断是否在表格内
 		mx := (ch.BBox.X0 + ch.BBox.X1) / 2
 		my := (ch.BBox.Y0 + ch.BBox.Y1) / 2
+		pt := model.Point{X: mx, Y: my}
+
+		// 使用空间索引快速查找可能包含该点的单元格
+		hits := idx.Query(model.Rect{X0: mx - 1, Y0: my - 1, X1: mx + 1, Y1: my + 1})
 		inTable := false
-		for _, tbl := range tables {
-			for r := 0; r < tbl.Rows; r++ {
-				for c := 0; c < tbl.Cols; c++ {
-					if tbl.Cells[r][c].BBox.Contains(model.Point{X: mx, Y: my}) {
-						inTable = true
-						break
-					}
-				}
-				if inTable {
-					break
-				}
-			}
-			if inTable {
+		for _, cellBBox := range hits {
+			if cellBBox.Contains(pt) {
+				inTable = true
 				break
 			}
 		}
@@ -412,12 +422,16 @@ func splitBoxOnTables(box model.TextBox, tables []model.Table) []model.TextBox {
 	var groups [][]model.TextLine // 拆分后的行组
 	var current []model.TextLine  // 当前正在积累的行组
 
-	for i, line := range box.Lines {
+	for _, line := range box.Lines {
 		// 检查该行是否位于某个表格内部
 		lineY0, lineY1 := lineYRange(line)
+		lineTop := math.Max(lineY0, lineY1)
+		lineBottom := math.Min(lineY0, lineY1)
 		insideTable := false
 		for _, tbl := range tables {
-			if lineY0 >= tbl.BBox.Y0 && lineY1 <= tbl.BBox.Y1 {
+			tblTop := math.Max(tbl.BBox.Y0, tbl.BBox.Y1)
+			tblBottom := math.Min(tbl.BBox.Y0, tbl.BBox.Y1)
+			if lineBottom >= tblBottom && lineTop <= tblTop {
 				insideTable = true
 				break
 			}
@@ -451,7 +465,6 @@ func splitBoxOnTables(box model.TextBox, tables []model.Table) []model.TextBox {
 		}
 
 		current = append(current, line)
-		_ = i
 	}
 	if len(current) > 0 {
 		groups = append(groups, current)
@@ -609,9 +622,9 @@ func SaveImages(pages []model.Page, outputDir string, prefix string) error {
 				ext = ".jpeg"
 			}
 			// 生成唯一文件名
-			uid := uuid.New().String()[:8]
+			uid := uuid.New().String()[:16]
 			filename := prefix + uid + ext
-			path := outputDir + string(os.PathSeparator) + filename
+			path := filepath.Join(outputDir, filename)
 			// 写入图片文件
 			if err := os.WriteFile(path, img.Data, 0644); err != nil {
 				return fmt.Errorf("write image: %w", err)
@@ -671,6 +684,7 @@ func detectTitle(pages []model.Page) string {
 
 // buildHeaderFooterSet 统计跨页重复出现的文本行，返回页眉页脚文本集合。
 // 出现在 >= max(3, 页数/2) 个页面上的文本行被认为是页眉或页脚。
+// 注意：此函数逻辑与 markdown.go 中的 FilterHeadersFooters 一致，用于标题检测阶段。
 func buildHeaderFooterSet(pages []model.Page) map[string]bool {
 	set := make(map[string]bool)
 	if len(pages) < 3 {
