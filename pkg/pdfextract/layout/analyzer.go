@@ -170,12 +170,40 @@ func groupCharsToLines(chars []model.Char, params Params) []model.TextLine {
 	return lines
 }
 
-// finalizeLine 完成一行文本的构建：按 X 排序字符，插入词间空格，计算边界框。
+// hasSameFontOverlap 检测同一字体中是否有字符在 X 方向上重叠。
+// 普通PDF中同一字体的字符依次排列不会重叠；只有双层渲染PDF才会
+// 在同一X位置绘制多个同字体字符（用于覆盖校正）。
+func hasSameFontOverlap(chars []model.Char) bool {
+	type fontSpan struct{ x0, x1 float64 }
+	spans := make(map[string][]fontSpan)
+	for _, c := range chars {
+		x0 := c.Origin.X
+		x1 := c.Origin.X + c.Advance
+		s := spans[c.Font.Name]
+		for _, existing := range s {
+			overlap := math.Min(x1, existing.x1) - math.Max(x0, existing.x0)
+			if overlap > 0 {
+				return true
+			}
+		}
+		spans[c.Font.Name] = append(s, fontSpan{x0, x1})
+	}
+	return false
+}
+
+// finalizeLine 完成一行文本的构建：排序字符，插入词间空格，计算边界框。
+// 当检测到同字体X重叠时（双层渲染PDF），按绘制序号排序以保持内容流顺序；
+// 否则按X坐标排序（普通PDF的正常布局顺序）。
 func finalizeLine(chars []model.Char, params Params) model.TextLine {
-	// 按 X 坐标排序
-	sort.Slice(chars, func(i, j int) bool {
-		return chars[i].Origin.X < chars[j].Origin.X
-	})
+	if hasSameFontOverlap(chars) {
+		sort.Slice(chars, func(i, j int) bool {
+			return chars[i].SeqNo < chars[j].SeqNo
+		})
+	} else {
+		sort.Slice(chars, func(i, j int) bool {
+			return chars[i].Origin.X < chars[j].Origin.X
+		})
+	}
 
 	// 估算平均字符前进宽度
 	avgAdvance := 0.0

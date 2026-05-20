@@ -20,6 +20,7 @@ import (
 	"io"
 	"math"
 	"os"
+	"sort"
 	"path/filepath"
 	"strings"
 
@@ -203,6 +204,7 @@ func (e *Extractor) extractPage(ctx *pdfcpuModel.Context, pageNum int) (*model.P
 	var textBoxes []model.TextBox
 	if e.opts.ExtractText && len(result.Chars) > 0 {
 		chars := result.Chars
+		chars = e.deduplicateLayerChars(chars)
 		// 如果检测到表格，先排除表格区域内的字符
 		if len(tables) > 0 {
 			chars = excludeTableChars(chars, tables)
@@ -390,6 +392,220 @@ func (e *Extractor) buildCIDFont(ctx *pdfcpuModel.Context, type0Dict types.Dict,
 // 布局分析器会先将字符按 Y 坐标分组为文本行，再将相邻行分组为文本框。
 func (e *Extractor) buildTextBoxes(chars []model.Char) []model.TextBox {
 	return layout.Analyze(chars, layout.DefaultParams())
+}
+
+// deduplicateLayerChars 去重双层 PDF 渲染产生的重复和交错字符。
+//
+// 某些 PDF 模板使用双层渲染：同一行文字由多个 BT/ET 块在不同位置绘制，
+// 后绘制的字符会覆盖先绘制的字符（浏览器/阅读器按此规则显示）。
+// 但我们的提取器收集所有字符并按 X 坐标排序，导致两层字符交错排列产生乱码。
+//
+// 算法基于绘制顺序（SeqNo）：
+//  1. 按 Y 坐标分组为"行"
+//  2. 对每行，识别由不同字体产生的"渲染段"（连续且 SeqNo 相近的字符集合）
+//  3. 检测两个渲染段在 X 方向的重叠区域
+//  4. 在重叠区域内，移除先绘制（SeqNo 较小）的段中的字符
+//  5. 对于无重叠的多字体行（如正常的中文+英文混排），不做处理
+func (e *Extractor) deduplicateLayerChars(chars []model.Char) []model.Char {
+	if len(chars) < 2 {
+		return chars
+	}
+
+	// 按 Y 降序、X 升序排序
+	sort.Slice(chars, func(i, j int) bool {
+		dy := chars[i].Origin.Y - chars[j].Origin.Y
+		if math.Abs(dy) > 3.0 {
+			return chars[i].Origin.Y > chars[j].Origin.Y
+		}
+		return chars[i].Origin.X < chars[j].Origin.X
+	})
+
+	// 检测是否存在双层渲染：找是否有同一行中来自不同字体且 X 重叠的字符
+	hasOverlap := false
+	type lineRange struct{ start, end int }
+	var lines []lineRange
+	curStart := 0
+	for i := 1; i <= len(chars); i++ {
+		if i == len(chars) || math.Abs(chars[i].Origin.Y-chars[curStart].Origin.Y) > 3.0 {
+			lines = append(lines, lineRange{curStart, i})
+			if !hasOverlap && hasOverlapInLine(chars[curStart:i]) {
+				hasOverlap = true
+			}
+			curStart = i
+		}
+	}
+
+	var result []model.Char
+	for _, lr := range lines {
+		lineChars := chars[lr.start:lr.end]
+		if len(lineChars) < 5 || !hasOverlap {
+			result = append(result, lineChars...)
+			continue
+		}
+		result = append(result, e.dedupLine(lineChars)...)
+	}
+	return result
+}
+
+// hasOverlapInLine 检测一行中是否存在来自不同字体且 X 位置重叠的字符
+func hasOverlapInLine(chars []model.Char) bool {
+	// 快速检查：统计每行的字体数
+	fonts := make(map[string]bool)
+	for _, c := range chars {
+		fonts[c.Font.Name] = true
+	}
+	if len(fonts) < 2 {
+		return false
+	}
+
+	// 检查不同字体的字符在 X 方向是否重叠
+	type fontSpan struct {
+		font     string
+		x0, x1   float64
+	}
+	spans := make(map[string]*fontSpan)
+	for _, c := range chars {
+		s, ok := spans[c.Font.Name]
+		if !ok {
+			spans[c.Font.Name] = &fontSpan{font: c.Font.Name, x0: c.Origin.X, x1: c.Origin.X + c.Advance}
+		} else {
+			if c.Origin.X < s.x0 {
+				s.x0 = c.Origin.X
+			}
+			if c.Origin.X+c.Advance > s.x1 {
+				s.x1 = c.Origin.X + c.Advance
+			}
+		}
+	}
+
+	// 检查任意两个不同字体的 span 是否重叠
+	var spanList []fontSpan
+	for _, s := range spans {
+		spanList = append(spanList, *s)
+	}
+	for i := 0; i < len(spanList); i++ {
+		for j := i + 1; j < len(spanList); j++ {
+			a, b := spanList[i], spanList[j]
+			if a.font == b.font {
+				continue
+			}
+			// X 方向重叠检测
+			overlap := math.Min(a.x1, b.x1) - math.Max(a.x0, b.x0)
+			if overlap > 5.0 { // 至少 5pt 的重叠才认为是双层渲染
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// dedupLine 对单行字符执行基于绘制顺序的去重。
+// 将字符按字体分组，检测不同字体组的 X 重叠区域。
+// 在重叠区域内，计算每个字体组的平均 SeqNo（仅统计重叠区域内的字符），
+// 移除平均 SeqNo 较小的组在重叠区域内的字符。
+func (e *Extractor) dedupLine(chars []model.Char) []model.Char {
+	type fontGroup struct {
+		font      string
+		chars     []model.Char
+		x0, x1    float64
+	}
+	groupMap := make(map[string]*fontGroup)
+	for _, c := range chars {
+		g, ok := groupMap[c.Font.Name]
+		if !ok {
+			g = &fontGroup{font: c.Font.Name}
+			groupMap[c.Font.Name] = g
+		}
+		g.chars = append(g.chars, c)
+		cx0 := c.Origin.X
+		cx1 := c.Origin.X + c.Advance
+		if len(g.chars) == 1 {
+			g.x0, g.x1 = cx0, cx1
+		} else {
+			if cx0 < g.x0 {
+				g.x0 = cx0
+			}
+			if cx1 > g.x1 {
+				g.x1 = cx1
+			}
+		}
+	}
+	if len(groupMap) < 2 {
+		return chars
+	}
+	var groups []*fontGroup
+	for _, g := range groupMap {
+		groups = append(groups, g)
+	}
+
+	removeSet := make(map[int]bool)
+	for i := 0; i < len(groups); i++ {
+		for j := i + 1; j < len(groups); j++ {
+			a, b := groups[i], groups[j]
+			overlapX0 := math.Max(a.x0, b.x0)
+			overlapX1 := math.Min(a.x1, b.x1)
+			overlap := overlapX1 - overlapX0
+			if overlap < 5.0 {
+				continue
+			}
+			// 仅统计重叠区域内的字符的平均 SeqNo
+			var aSeqSum, bSeqSum int
+			var aCnt, bCnt int
+			for _, c := range a.chars {
+				if c.Origin.X >= overlapX0-2.0 && c.Origin.X <= overlapX1+2.0 {
+					aSeqSum += c.SeqNo
+					aCnt++
+				}
+			}
+			for _, c := range b.chars {
+				if c.Origin.X >= overlapX0-2.0 && c.Origin.X <= overlapX1+2.0 {
+					bSeqSum += c.SeqNo
+					bCnt++
+				}
+			}
+			if aCnt == 0 || bCnt == 0 {
+				continue
+			}
+			aAvg := float64(aSeqSum) / float64(aCnt)
+			bAvg := float64(bSeqSum) / float64(bCnt)
+			var earlier, later *fontGroup
+			if aAvg < bAvg {
+				earlier, later = a, b
+			} else {
+				earlier, later = b, a
+			}
+			// 如果较晚的字体组在重叠区域只有空白字符，跳过去重。
+			// 空白不可能是可见文字的“校正层”，重叠只是布局间距导致的偶然重叠。
+			laterOnlyWhitespace := true
+			for _, c := range later.chars {
+				if c.Origin.X >= overlapX0-2.0 && c.Origin.X <= overlapX1+2.0 {
+					if strings.TrimSpace(c.Text) != "" {
+						laterOnlyWhitespace = false
+						break
+					}
+				}
+			}
+			if laterOnlyWhitespace {
+				continue
+			}
+			// 移除先绘制组在重叠区域内的字符
+			for _, c := range earlier.chars {
+				if c.Origin.X >= overlapX0-2.0 && c.Origin.X <= overlapX1+2.0 {
+					removeSet[c.SeqNo] = true
+				}
+			}
+		}
+	}
+	if len(removeSet) == 0 {
+		return chars
+	}
+	var result []model.Char
+	for _, c := range chars {
+		if !removeSet[c.SeqNo] {
+			result = append(result, c)
+		}
+	}
+	return result
 }
 
 // excludeTableChars 从字符列表中排除落在表格单元格内的字符，

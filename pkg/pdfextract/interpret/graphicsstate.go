@@ -3,10 +3,11 @@ package interpret
 // GraphicsState 保存当前的图形状态，包括变换矩阵、颜色和线宽。
 // 这些状态影响文本和图形在页面上的渲染位置和外观。
 type GraphicsState struct {
-	CTM         [6]float64 // 当前变换矩阵 [a b c d e f]，将用户空间坐标映射到设备空间
-	FillColor   [3]float64 // 填充颜色（RGB，各分量 0-1）
-	StrokeColor [3]float64 // 描边颜色（RGB，各分量 0-1）
-	LineWidth   float64    // 线宽
+	CTM          [6]float64 // 当前变换矩阵 [a b c d e f]，将用户空间坐标映射到设备空间
+	FillColor    [3]float64 // 填充颜色（RGB，各分量 0-1）
+	StrokeColor  [3]float64 // 描边颜色（RGB，各分量 0-1）
+	LineWidth    float64    // 线宽
+	ClipApplied  bool       // 当前是否处于裁剪路径内（W/W* 操作符设置）
 }
 
 // NewGraphicsState 创建默认的图形状态（单位矩阵，黑色填充/描边，1pt 线宽）
@@ -16,6 +17,7 @@ func NewGraphicsState() *GraphicsState {
 		FillColor:   [3]float64{0, 0, 0},            // 黑色
 		StrokeColor: [3]float64{0, 0, 0},             // 黑色
 		LineWidth:   1.0,
+		ClipApplied: false,
 	}
 }
 
@@ -54,6 +56,7 @@ func (g *GraphicsState) Clone() *GraphicsState {
 		FillColor:   g.FillColor,
 		StrokeColor: g.StrokeColor,
 		LineWidth:   g.LineWidth,
+		ClipApplied: g.ClipApplied,
 	}
 }
 

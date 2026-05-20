@@ -23,6 +23,14 @@ var tocLineRe = regexp.MustCompile(`^(.{1,150}?)\s*[.。…]{3,} *\d+[.。… \t
 // headingNumRe 匹配标题开头的编号，用于推断层级。
 var headingNumRe = regexp.MustCompile(`^(\d+(?:\.\d+)*)\s`)
 
+// 以下正则用于清洗目录行中的多余点号和空格
+var (
+	dotGapRe    = regexp.MustCompile(`[.。…]\s+[.。…]`)   // 点号之间的空格
+	dotNumGapRe = regexp.MustCompile(`[.。…]\s+(\d)`)     // 点号和数字之间的空格
+	numDotGapRe = regexp.MustCompile(`(\d)\s+[.。…]`)     // 数字和点号之间的空格
+	trailingDotsRe = regexp.MustCompile(`(\d)[.。…]+\s*$`) // 页码数字后的多余点号
+)
+
 // PagesToMarkdown 将提取的 PDF 页面数据转换为 Markdown 格式字符串。
 //
 // 处理流程：
@@ -300,12 +308,28 @@ func writeTextBoxMarkdown(sb *strings.Builder, tb model.TextBox, bodySize float6
 		}
 		text = strings.TrimSpace(text)
 
+		isTOC := isTocLine(text)
+
+		// 清洗目录行的多余点号和空格
+		// 某些 TOC 行的点号之间有空格，导致 isTocLine 不匹配，
+		// 先尝试清洗一次再检测
+		if !isTOC {
+			cleaned := cleanTocDots(text)
+			if isTocLine(cleaned) {
+				isTOC = true
+				text = cleaned
+			}
+		} else {
+			text = cleanTocDots(text)
+		}
+
 		// 优先使用 TOC 条目匹配检测标题
-		if len(tocEntries) > 0 && !isTocLine(text) {
-			if level := matchTocEntry(text, tocEntries); level > 0 {
+		if len(tocEntries) > 0 && !isTOC {
+			if level, tocTitle := matchTocEntryWithTitle(text, tocEntries); level > 0 {
 				sb.WriteString(strings.Repeat("#", level+1)) // level 1 -> ##
 				sb.WriteString(" ")
-				sb.WriteString(text)
+				// 使用 TOC 原文替换可能乱码的正文文本
+				sb.WriteString(tocTitle)
 				sb.WriteString("\n\n")
 				continue
 			}
@@ -545,6 +569,43 @@ func matchTocEntry(text string, entries []tocEntry) int {
 	return 0
 }
 
+// matchTocEntryWithTitle 与 matchTocEntry 相同但额外返回匹配到的 TOC 条目标题。
+// 用于双层渲染 PDF 中用 TOC 原文替换乱码正文标题。
+func matchTocEntryWithTitle(text string, entries []tocEntry) (int, string) {
+	normText := normalizeHeadingText(text)
+	textNum := extractHeadingNum(normText)
+	for _, entry := range entries {
+		normEntry := normalizeHeadingText(entry.title)
+		if len(normText) == 0 || len(normEntry) == 0 {
+			continue
+		}
+		if textNum != "" {
+			entryNum := extractHeadingNum(normEntry)
+			if entryNum == textNum {
+				return entry.level, entry.title
+			}
+		}
+		textAfterNum := textAfterNumber(normText)
+		entryAfterNum := textAfterNumber(normEntry)
+		if textAfterNum != "" && entryAfterNum != "" && textNum != "" {
+			entryNum := extractHeadingNum(normEntry)
+			if entryNum == textNum && strings.HasPrefix(entryAfterNum, textAfterNum) {
+				return entry.level, entry.title
+			}
+			if entryNum == textNum && strings.HasPrefix(textAfterNum, entryAfterNum) {
+				return entry.level, entry.title
+			}
+		}
+		if strings.HasPrefix(normText, normEntry) {
+			return entry.level, entry.title
+		}
+		if strings.HasPrefix(normEntry, normText) {
+			return entry.level, entry.title
+		}
+	}
+	return 0, ""
+}
+
 // extractHeadingNum extracts the section number from heading text (e.g., "6.1" from "6.1 Title").
 func extractHeadingNum(s string) string {
 	m := headingNumRe.FindStringSubmatch(s)
@@ -571,4 +632,21 @@ func normalizeHeadingText(s string) string {
 // isTocLine checks if a line is a TOC entry (contains dot leaders and page number).
 func isTocLine(text string) bool {
 	return tocLineRe.MatchString(text)
+}
+
+// cleanTocDots 清洗目录行中的多余点号和空格。
+// 步骤1：合并相邻点号之间的空格、点号与数字之间的空格
+// 步骤2：移除页码数字后到行尾的多余点号（如 "2.. ............" → "2"）
+func cleanTocDots(text string) string {
+	// Step 1: 合并点号之间的空格 (. . → ..)
+	for dotGapRe.MatchString(text) {
+		text = dotGapRe.ReplaceAllString(text, "..")
+	}
+	// 合并点号和数字之间的空格 (. 2 → .2)
+	text = dotNumGapRe.ReplaceAllString(text, ".$1")
+	// 合并数字和点号之间的空格 (2 . → 2.)
+	text = numDotGapRe.ReplaceAllString(text, "$1.")
+	// Step 2: 移除页码数字后的多余点号
+	text = trailingDotsRe.ReplaceAllString(text, "$1")
+	return text
 }

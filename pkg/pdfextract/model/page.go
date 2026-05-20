@@ -8,11 +8,14 @@ import (
 // Char 是 PDF 内容流解释器输出的最小文本单元，对应 PDF 中的一个字符。
 // 由文本显示操作符（Tj、TJ 等）产生，包含字符文本、位置和字体信息。
 type Char struct {
-	Text    string   // 字符的 Unicode 文本内容
-	Origin  Point    // 字符基线起点在页面坐标系中的位置
-	BBox    Rect     // 字符的边界框（在页面坐标系中）
-	Font    FontInfo // 字符的字体信息
-	Advance float64  // 水平前进宽度（渲染后光标移动的距离）
+	Text      string   // 字符的 Unicode 文本内容
+	Origin    Point    // 字符基线起点在页面坐标系中的位置
+	BBox      Rect     // 字符的边界框（在页面坐标系中）
+	Font      FontInfo // 字符的字体信息
+	Advance   float64  // 水平前进宽度（渲染后光标移动的距离）
+	FormObjNr int      // 产生此字符的 Form XObject 对象编号（0=页面直接内容）
+	SeqNo     int      // 字符在内容流中的绘制序号（用于双层渲染去重：后绘制的覆盖先绘制的）
+	Clipped   bool     // 字符是否在裁剪路径内产生（W/W* 操作符后的隐藏层文本）
 }
 
 // TextLine 表示一行文本，由多个连续的 Char 组成。

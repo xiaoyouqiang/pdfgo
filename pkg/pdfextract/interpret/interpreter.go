@@ -35,6 +35,8 @@ type ContentInterpreter struct {
 	formXObjects    map[string]*FormXObject     // XObject 名称 → Form XObject 映射
 	result          *model.InterpretResult      // 解释结果（字符、矩形、线段、图片位置）
 	processingObjs  map[int]bool                // 正在处理的 Form XObject 对象编号（防止无限递归）
+	currentFormObjNr int                        // 当前正在处理的 Form XObject 对象编号（0=页面直接内容）
+	charSeqNo       int                         // 字符绘制序号计数器（每个字符递增，用于双层渲染去重）
 
 	pathPoints []model.Point // 当前路径的点集（用于表格线段检测）
 }
@@ -284,6 +286,13 @@ func (ci *ContentInterpreter) dispatch(op string, operands []Operand) {
 	case "f", "f*", "B":
 		ci.pathPoints = nil
 
+	// --- 裁剪路径操作符 ---
+	case "W", "W*":
+		ci.gState.ClipApplied = true
+		ci.pathPoints = nil
+	case "n":
+		ci.pathPoints = nil
+
 	// --- XObject 操作符 ---
 	case "Do":
 		if len(operands) >= 1 {
@@ -335,6 +344,11 @@ func (ci *ContentInterpreter) interpretFormXObjectByName(name string) {
 	// 保存图形状态
 	ci.gStack.Push(ci.gState)
 	savedGState := ci.gState
+
+	// 保存并设置当前 Form 对象编号（用于标记字符来源）
+	savedFormObjNr := ci.currentFormObjNr
+	ci.currentFormObjNr = form.ObjNr
+	defer func() { ci.currentFormObjNr = savedFormObjNr }()
 
 	// 应用 Form 的变换矩阵
 	if form.HasMatrix {
@@ -427,12 +441,16 @@ func (ci *ContentInterpreter) showString(data []byte) {
 			Y1: y + charHeightPage*0.8,
 		}
 
+		ci.charSeqNo++
 		ci.result.Chars = append(ci.result.Chars, model.Char{
-			Text:    string(r),
-			Origin:  model.Point{X: x, Y: y},
-			BBox:    bbox,
-			Font:    ci.buildFontInfo(),
-			Advance: charWidthPage,
+			Text:      string(r),
+			Origin:    model.Point{X: x, Y: y},
+			BBox:      bbox,
+			Font:      ci.buildFontInfo(),
+			Advance:   charWidthPage,
+			FormObjNr: ci.currentFormObjNr,
+			SeqNo:     ci.charSeqNo,
+			Clipped:   ci.gState.ClipApplied,
 		})
 
 		ci.tState.Tm[4] += ci.tState.Tm[0] * displacementTx
@@ -471,9 +489,10 @@ func (ci *ContentInterpreter) currentFont() font.FontDecoder {
 
 func (ci *ContentInterpreter) buildFontInfo() model.FontInfo {
 	return model.FontInfo{
-		Name:  ci.tState.Tf,
-		Size:  ci.tState.Tfs,
-		Color: ci.gState.FillColor,
+		Name:       ci.tState.Tf,
+		Size:       ci.tState.Tfs,
+		Color:      ci.gState.FillColor,
+		RenderMode: ci.tState.Tr,
 	}
 }
 
