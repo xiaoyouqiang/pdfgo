@@ -3,11 +3,25 @@ package pdfextract
 import (
 	"fmt"
 	"math"
+	"regexp"
 	"sort"
 	"strings"
 
 	"github.com/xiaoyouqiang/pdfgo/pkg/pdfextract/model"
 )
+
+// tocEntry 表示从 PDF 目录行中提取的一个条目。
+type tocEntry struct {
+	title string // 目录条目标题，如 "1 目的 Purpose"
+	level int    // 标题层级：1=H2, 2=H3, 3=H4
+}
+
+// tocLineRe 匹配 PDF 风格的目录行，提取标题部分。
+// 格式：标题文本 + 3个以上点号 + 页码（可能带尾随点号/空格）
+var tocLineRe = regexp.MustCompile(`^(.{1,150}?)\s*[.。…]{3,} *\d+[.。… \t]*$`)
+
+// headingNumRe 匹配标题开头的编号，用于推断层级。
+var headingNumRe = regexp.MustCompile(`^(\d+(?:\.\d+)*)\s`)
 
 // PagesToMarkdown 将提取的 PDF 页面数据转换为 Markdown 格式字符串。
 //
@@ -25,9 +39,12 @@ import (
 func PagesToMarkdown(pages []model.Page) string {
 	// 第一步：过滤页眉页脚
 	FilterHeadersFooters(pages)
-	// 第二步：计算正文字体大小
+	// 第二步：提取目录条目（TOC-based 标题检测）
+	tocEntries := extractTocEntries(pages)
+
+	// 第三步：计算正文字体大小
 	bodySize := findBodyFontSize(pages)
-	// 第三步：自动发现标题层级
+	// 第四步：自动发现标题层级（作为 TOC 检测的回退）
 	tiers := buildHeadingTiers(pages, bodySize)
 
 	var sb strings.Builder
@@ -42,7 +59,7 @@ func PagesToMarkdown(pages []model.Page) string {
 				// 在映射表中查找对应的文本框
 				tb := findTextBox(tbMap, item.BBox)
 				if tb != nil {
-					writeTextBoxMarkdown(&sb, *tb, bodySize, tiers)
+					writeTextBoxMarkdown(&sb, *tb, bodySize, tiers, tocEntries)
 				} else {
 					// 未找到文本框，直接写入原始文本
 					text := strings.TrimSpace(item.Text)
@@ -275,14 +292,26 @@ func lineFontSize(line model.TextLine) float64 {
 // writeTextBoxMarkdown 将一个文本框转换为 Markdown 格式。
 // 如果存在标题层级信息（tiers），使用自动分层结果判断标题级别；
 // 否则回退到固定阈值（diff > 2 → H2, diff > 0.5 → H3）。
-func writeTextBoxMarkdown(sb *strings.Builder, tb model.TextBox, bodySize float64, tiers []headingTier) {
+func writeTextBoxMarkdown(sb *strings.Builder, tb model.TextBox, bodySize float64, tiers []headingTier, tocEntries []tocEntry) {
 	for _, line := range tb.Lines {
 		text := line.Text()
 		if text == "" {
 			continue
 		}
-		fs := lineFontSize(line)
 		text = strings.TrimSpace(text)
+
+		// 优先使用 TOC 条目匹配检测标题
+		if len(tocEntries) > 0 && !isTocLine(text) {
+			if level := matchTocEntry(text, tocEntries); level > 0 {
+				sb.WriteString(strings.Repeat("#", level+1)) // level 1 -> ##
+				sb.WriteString(" ")
+				sb.WriteString(text)
+				sb.WriteString("\n\n")
+				continue
+			}
+		}
+
+		fs := lineFontSize(line)
 
 		if len(tiers) > 0 {
 			// 使用自动分层结果
@@ -439,4 +468,107 @@ func bboxKey(r model.Rect) [4]int {
 		int(math.Round(r.X1 * s)),
 		int(math.Round(r.Y1 * s)),
 	}
+}
+
+// extractTocEntries scans all pages for TOC lines and extracts entry titles and levels.
+func extractTocEntries(pages []model.Page) []tocEntry {
+	var entries []tocEntry
+	seen := make(map[string]bool)
+
+	for _, page := range pages {
+		for _, tb := range page.TextBoxes {
+			for _, line := range tb.Lines {
+				text := strings.TrimSpace(line.Text())
+				if text == "" {
+					continue
+				}
+				m := tocLineRe.FindStringSubmatch(text)
+				if m == nil {
+					continue
+				}
+				title := strings.TrimSpace(m[1])
+				if title == "" || seen[title] {
+					continue
+				}
+				seen[title] = true
+
+				level := 1
+				if nm := headingNumRe.FindStringSubmatch(title); nm != nil {
+					dots := strings.Count(nm[1], ".")
+					level = dots + 1
+				}
+				entries = append(entries, tocEntry{title: title, level: level})
+			}
+		}
+	}
+	return entries
+}
+
+// matchTocEntry checks if text matches a TOC entry, returning the heading level.
+func matchTocEntry(text string, entries []tocEntry) int {
+	normText := normalizeHeadingText(text)
+	// 提取正文行的编号（如 "6.1"）
+	textNum := extractHeadingNum(normText)
+	for _, entry := range entries {
+		normEntry := normalizeHeadingText(entry.title)
+		if len(normText) == 0 || len(normEntry) == 0 {
+			continue
+		}
+		// 策略1：编号匹配——编号相同即认为是同一章节
+		if textNum != "" {
+			entryNum := extractHeadingNum(normEntry)
+			if entryNum == textNum {
+				return entry.level
+			}
+		}
+		// 策略2：前缀匹配（容忍 OCR 差异）
+		// 比较编号后的第一个词（通常是中文标题）
+		textAfterNum := textAfterNumber(normText)
+		entryAfterNum := textAfterNumber(normEntry)
+		if textAfterNum != "" && entryAfterNum != "" && textNum != "" {
+			entryNum := extractHeadingNum(normEntry)
+			if entryNum == textNum && strings.HasPrefix(entryAfterNum, textAfterNum) {
+				return entry.level
+			}
+			if entryNum == textNum && strings.HasPrefix(textAfterNum, entryAfterNum) {
+				return entry.level
+			}
+		}
+		// 策略3：完整前缀匹配
+		if strings.HasPrefix(normText, normEntry) {
+			return entry.level
+		}
+		if strings.HasPrefix(normEntry, normText) {
+			return entry.level
+		}
+	}
+	return 0
+}
+
+// extractHeadingNum extracts the section number from heading text (e.g., "6.1" from "6.1 Title").
+func extractHeadingNum(s string) string {
+	m := headingNumRe.FindStringSubmatch(s)
+	if m == nil {
+		return ""
+	}
+	return m[1]
+}
+
+// textAfterNumber returns the text after the section number.
+func textAfterNumber(s string) string {
+	m := headingNumRe.FindStringSubmatch(s)
+	if m == nil {
+		return s
+	}
+	return strings.TrimSpace(s[len(m[0]):])
+}
+
+// normalizeHeadingText normalizes heading text for matching.
+func normalizeHeadingText(s string) string {
+	return strings.Join(strings.Fields(s), " ")
+}
+
+// isTocLine checks if a line is a TOC entry (contains dot leaders and page number).
+func isTocLine(text string) bool {
+	return tocLineRe.MatchString(text)
 }

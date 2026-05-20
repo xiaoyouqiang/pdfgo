@@ -151,8 +151,8 @@ func (s *Scanner) Next() (Token, error) {
 		start := s.pos
 		if s.pos < len(s.data) && s.data[s.pos] == '<' {
 			// << 字典标记 — 在内容流中不常见，回退并作为操作符处理
-			s.pos--
-			return s.scanOperator()
+			s.pos++
+			return s.Next()
 		}
 		// 十六进制字符串：将十六进制字符解码为字节
 		for s.pos < len(s.data) && s.data[s.pos] != '>' {

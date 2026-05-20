@@ -183,6 +183,11 @@ func (e *Extractor) extractPage(ctx *pdfcpuModel.Context, pageNum int) (*model.P
 	if e.opts.ExtractImage {
 		interpreter.SetXObjects(resolveXObjects(ctx, inhPAttrs.Resources))
 	}
+	// 解析 Form XObject 并传入解释器（用于递归处理嵌套内容流）
+	formXObjects := e.resolveFormXObjects(ctx, inhPAttrs.Resources)
+	if len(formXObjects) > 0 {
+		interpreter.SetFormXObjects(formXObjects)
+	}
 	result := interpreter.Interpret(contentBytes)
 
 	// 表格检测：基于解释器输出的矩形和线段，检测表格结构
@@ -328,6 +333,32 @@ func (e *Extractor) buildCIDFont(ctx *pdfcpuModel.Context, type0Dict types.Dict,
 	}
 	// 没有 CMap 则无法解码字符，跳过
 	if cmap == nil {
+		// 没有 ToUnicode CMap，尝试使用预定义编码回退
+		encoding := ""
+		if enc := type0Dict.NameEntry("Encoding"); enc != nil {
+			encoding = *enc
+		}
+		if encoding == "" {
+			return
+		}
+		baseFont := ""
+		if s := type0Dict.NameEntry("BaseFont"); s != nil {
+			baseFont = *s
+		}
+		dw := 1.0
+		descArr := type0Dict.ArrayEntry("DescendantFonts")
+		if len(descArr) > 0 {
+			if cidRef, ok := descArr[0].(types.IndirectRef); ok {
+				cidDict, err := ctx.DereferenceDict(cidRef)
+				if err == nil {
+					if dwVal := cidDict.IntEntry("DW"); dwVal != nil {
+						dw = float64(*dwVal) / 1000.0
+					}
+				}
+			}
+		}
+		decoder := font.NewCIDFontDecoderWithEncoding(baseFont, encoding, dw)
+		resolver.Register(resName, decoder)
 		return
 	}
 
@@ -545,6 +576,106 @@ func resolveXObjects(ctx *pdfcpuModel.Context, resources types.Dict) map[string]
 		}
 	}
 	return result
+}
+
+// resolveFormXObjects 从页面资源中解析 Form XObject。
+// Form XObject 是类型为 "Form" 的 XObject，其内容流本身也是 PDF 内容流，
+// 可以包含文本、图形等操作符。此函数递归解析 Form XObject 的内容流和字体资源，
+// 包括嵌套的 Form XObject（同一名称在不同作用域可指向不同对象），
+// 返回名称到 FormXObject 的映射。
+func (e *Extractor) resolveFormXObjects(ctx *pdfcpuModel.Context, resources types.Dict) map[string]*interpret.FormXObject {
+	result := make(map[string]*interpret.FormXObject)
+	if resources == nil {
+		return result
+	}
+	visited := make(map[int]bool) // 防止重复解析同一对象
+	e.resolveFormXObjectsFromDict(ctx, resources, result, visited, 0)
+	return result
+}
+
+// resolveFormXObjectsFromDict 从指定的资源字典中递归解析 Form XObject。
+// depth 参数限制递归深度，防止过深的嵌套。
+func (e *Extractor) resolveFormXObjectsFromDict(
+	ctx *pdfcpuModel.Context,
+	resources types.Dict,
+	result map[string]*interpret.FormXObject,
+	visited map[int]bool,
+	depth int,
+) {
+	if depth > 4 { // 最多递归 4 层
+		return
+	}
+	xobjEntry, found := resources.Find("XObject")
+	if !found {
+		return
+	}
+	xobjDict, ok := xobjEntry.(types.Dict)
+	if !ok {
+		return
+	}
+	for name, entry := range xobjDict {
+		indRef, ok := entry.(types.IndirectRef)
+		if !ok {
+			continue
+		}
+		objNr := indRef.ObjectNumber.Value()
+		if visited[objNr] {
+			continue
+		}
+		sd, _, err := ctx.DereferenceStreamDict(indRef)
+		if err != nil || sd == nil {
+			continue
+		}
+		subtype := sd.Dict.NameEntry("Subtype")
+		if subtype == nil || *subtype != "Form" {
+			continue
+		}
+		if err := sd.Decode(); err != nil {
+			continue
+		}
+		visited[objNr] = true
+
+		form := &interpret.FormXObject{
+			Content: sd.Content,
+			ObjNr:   objNr,
+		}
+		// 解析 Form 的 Matrix
+		if matrixArr := sd.Dict.ArrayEntry("Matrix"); len(matrixArr) >= 6 {
+			nums := make([]float64, 6)
+			ok := true
+			for i, v := range matrixArr {
+				switch val := v.(type) {
+				case types.Integer:
+					nums[i] = float64(val.Value())
+				case types.Float:
+					nums[i] = val.Value()
+				default:
+					ok = false
+				}
+			}
+			if ok {
+				form.Matrix = [6]float64{nums[0], nums[1], nums[2], nums[3], nums[4], nums[5]}
+				form.HasMatrix = true
+			}
+		}
+		// 解析 Form 自身的 Resources（字体和嵌套 Form XObject）
+		formResDict := sd.Dict.DictEntry("Resources")
+		if formResDict != nil {
+			// 解析字体
+			fontResolver := font.NewFontResolver()
+			e.buildFonts(ctx, formResDict, fontResolver)
+			form.Fonts = fontResolver.AllFonts()
+			// 递归解析嵌套的 Form XObject
+			// 使用独立的 visited 集合，避免不同外层 Form 共享同一 visited 导致嵌套 Form 被跳过
+			nestedVisited := map[int]bool{objNr: true}
+			nestedForms := make(map[string]*interpret.FormXObject)
+			e.resolveFormXObjectsFromDict(ctx, formResDict, nestedForms, nestedVisited, depth+1)
+			if len(nestedForms) > 0 {
+				form.FormXObjects = nestedForms
+			}
+		}
+		result[name] = form
+	}
 }
 
 // extractImages 提取指定页面中的所有图片，并与解释器记录的绘制位置匹配。

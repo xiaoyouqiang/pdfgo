@@ -185,8 +185,9 @@ func (m *SplitModel) isTocContent(line string) bool {
 }
 
 // pdfTocLineRe 匹配 PDF 风格的目录行，如 "背景...............1"
-// 模式：1-80 个任意字符 + 3 个以上点号 + 可选空格 + 数字
-var pdfTocLineRe = regexp.MustCompile(`^.{1,80}[\.。…]{3,} *\d+\s*$`)
+// 模式：1-150 个任意字符 + 3 个以上点号 + 可选空格 + 数字 + 可选尾随点号/空格
+// 注意：中文字符在 UTF-8 中占 3 字节，所以限制放宽到 150 字节以适应中文标题
+var pdfTocLineRe = regexp.MustCompile(`^.{1,150}[\.。…]{3,} *\d+[\.。… \t]*$`)
 
 // isPdfTocLine 检测 PDF 风格的目录条目行。
 // 匹配格式："标题文本……页码" 或单独的 "目录"
@@ -229,11 +230,26 @@ func (m *SplitModel) isProbablyTocParagraph(content string) bool {
 				tocLines++
 			}
 		}
-		if len(lines) > 0 && tocLines >= len(lines)/2 && tocLines >= 2 {
+		if tocLines >= 2 && (tocLines >= len(lines)/2 || tocLines >= 5) {
 			return true
 		}
 	}
 	return false
+}
+
+// stripTocLines 从内容中删除 PDF 风格的目录行，保留正文。
+func (m *SplitModel) stripTocLines(content string) string {
+	if !m.filterToc {
+		return content
+	}
+	lines := strings.Split(content, "\n")
+	var kept []string
+	for _, line := range lines {
+		if !m.isPdfTocLine(line) {
+			kept = append(kept, line)
+		}
+	}
+	return strings.TrimSpace(strings.Join(kept, "\n"))
 }
 
 // getHeadingLevel returns the heading level (1-6) or 0 if not a heading
@@ -404,8 +420,8 @@ func (m *SplitModel) treeToParagraphs(nodes []*TreeNode) []SplitResult {
 					for _, block := range blocks {
 						block = strings.TrimSpace(block)
 						if block != "" {
-							// Skip TOC content
-							if m.isProbablyTocParagraph(block) {
+							block = m.stripTocLines(block)
+							if block == "" {
 								continue
 							}
 							result = append(result, SplitResult{
@@ -418,8 +434,8 @@ func (m *SplitModel) treeToParagraphs(nodes []*TreeNode) []SplitResult {
 						}
 					}
 				} else {
-					// Skip TOC content
-					if m.isProbablyTocParagraph(content) {
+					content = m.stripTocLines(content)
+					if content == "" {
 						continue
 					}
 					result = append(result, SplitResult{
