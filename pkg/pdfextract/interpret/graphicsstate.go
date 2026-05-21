@@ -72,7 +72,13 @@ func NewGStateStack() *GStateStack {
 }
 
 // Push 保存当前图形状态到栈中（对应 q 操作符）
+// 超过最大深度时静默忽略，防止恶意 PDF 导致内存耗尽
+const maxGStateDepth = 256
+
 func (s *GStateStack) Push(g *GraphicsState) {
+	if len(s.stack) >= maxGStateDepth {
+		return
+	}
 	s.stack = append(s.stack, g.Clone())
 }
 

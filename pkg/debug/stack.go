@@ -6,13 +6,19 @@ import (
 	"strings"
 )
 
-func Caller(len int) string {
-	var log = make([]string,4,4)
-	for i := 0 ; i< len; i++ {
+func Caller(depth int) string {
+	if depth <= 0 {
+		return ""
+	}
+	log := make([]string, 0, depth)
+	for i := 0; i < depth; i++ {
 		pc, file, line, ok := runtime.Caller(i)
-		pcName := runtime.FuncForPC(pc).Name() //获取函数名
-		log = append(log,fmt.Sprintf("%s   %d   %t   %s",  file, line, ok, pcName))
+		if !ok {
+			break
+		}
+		pcName := runtime.FuncForPC(pc).Name()
+		log = append(log, fmt.Sprintf("%s   %d   %t   %s", file, line, ok, pcName))
 	}
 
-	return strings.Join(log,"\n")
+	return strings.Join(log, "\n")
 }

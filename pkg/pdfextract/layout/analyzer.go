@@ -138,8 +138,13 @@ func groupCharsToLines(chars []model.Char, params Params) []model.TextLine {
 			continue
 		}
 
-		ref := currentLine[0]
-		yGap := math.Abs(ch.Origin.Y - ref.Origin.Y)
+			// 用当前行所有字符的 Y 中位数作为基准，避免首个字符异常导致误判
+			ySum := 0.0
+			for _, c := range currentLine {
+				ySum += c.Origin.Y
+			}
+			refY := ySum / float64(len(currentLine))
+			yGap := math.Abs(ch.Origin.Y - refY)
 
 		// Y 差异超过阈值，开始新行
 		if yGap > lineHeightThreshold {
@@ -291,9 +296,9 @@ func groupLinesToTextBoxes(lines []model.TextLine, params Params) []model.TextBo
 			lastHeight = 12
 		}
 
-		// 计算与上一行的垂直间距
-		vGap := math.Abs(line.BBox.Y0 - lastLine.BBox.Y0)
 
+			// 计算与上一行的垂直间距（上一行底部到当前行顶部的距离）
+			vGap := lastLine.BBox.Y0 - line.BBox.Y1
 		// 检查水平方向是否有重叠
 		overlapStart := math.Max(lastLine.BBox.X0, line.BBox.X0)
 		overlapEnd := math.Min(lastLine.BBox.X1, line.BBox.X1)

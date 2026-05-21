@@ -305,10 +305,10 @@ func (e *Extractor) buildFonts(ctx *pdfcpuModel.Context, resources types.Dict, r
 				firstChar = *fi
 			}
 			for i, w := range wArr {
-				if num, ok := w.(types.Integer); ok && firstChar+i < 256 {
+				if num, ok := w.(types.Integer); ok && firstChar+i >= 0 && firstChar+i < 256 {
 					widths[byte(firstChar+i)] = float64(num) / 1000.0 // 宽度单位为千分之一
 				}
-				if num, ok := w.(types.Float); ok && firstChar+i < 256 {
+				if num, ok := w.(types.Float); ok && firstChar+i >= 0 && firstChar+i < 256 {
 					widths[byte(firstChar+i)] = num.Value()
 				}
 			}
@@ -538,7 +538,7 @@ func (e *Extractor) dedupLine(chars []model.Char) []model.Char {
 		groups = append(groups, g)
 	}
 
-	removeSet := make(map[int]bool)
+	removeSet := make(map[[2]int]bool)
 	for i := 0; i < len(groups); i++ {
 		for j := i + 1; j < len(groups); j++ {
 			a, b := groups[i], groups[j]
@@ -588,10 +588,25 @@ func (e *Extractor) dedupLine(chars []model.Char) []model.Char {
 			if laterOnlyWhitespace {
 				continue
 			}
+				// 如果先绘制组在重叠区域内包含非空白可读文本，
+				// 且两组都有实质内容，不做去重以避免误删正常文本。
+				earlierOnlyWhitespace := true
+				for _, c := range earlier.chars {
+					if c.Origin.X >= overlapX0-2.0 && c.Origin.X <= overlapX1+2.0 {
+						if strings.TrimSpace(c.Text) != "" {
+							earlierOnlyWhitespace = false
+							break
+						}
+					}
+				}
+				if !earlierOnlyWhitespace && !laterOnlyWhitespace {
+					// 两组都有实质内容，可能不是双层渲染覆盖，跳过去重
+					continue
+				}
 			// 移除先绘制组在重叠区域内的字符
 			for _, c := range earlier.chars {
 				if c.Origin.X >= overlapX0-2.0 && c.Origin.X <= overlapX1+2.0 {
-					removeSet[c.SeqNo] = true
+					removeSet[[2]int{c.FormObjNr, c.SeqNo}] = true
 				}
 			}
 		}
@@ -601,7 +616,7 @@ func (e *Extractor) dedupLine(chars []model.Char) []model.Char {
 	}
 	var result []model.Char
 	for _, c := range chars {
-		if !removeSet[c.SeqNo] {
+		if !removeSet[[2]int{c.FormObjNr, c.SeqNo}] {
 			result = append(result, c)
 		}
 	}
@@ -919,7 +934,11 @@ func (e *Extractor) extractImages(ctx *pdfcpuModel.Context, pageNum int, placeme
 		// 读取图片的二进制数据
 		var data []byte
 		if img.Reader != nil {
-			data, _ = io.ReadAll(img.Reader)
+			var err error
+				data, err = io.ReadAll(io.LimitReader(img.Reader, 100<<20))
+				if err != nil {
+					continue
+				}
 		}
 		if len(data) == 0 {
 			continue

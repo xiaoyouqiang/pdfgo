@@ -15,7 +15,7 @@ import (
 //  2. 对每个交叉点，寻找其下方和右方的交叉点
 //  3. 验证四个交叉点之间都有边连接（上下左右各一条）
 //  4. 四个交叉点围成的矩形区域即为一个单元格
-func BuildCells(intersections []Intersection) []model.Cell {
+func BuildCells(intersections []Intersection, xTol, yTol float64) []model.Cell {
 	if len(intersections) < 4 {
 		return nil
 	}
@@ -39,7 +39,7 @@ func BuildCells(intersections []Intersection) []model.Cell {
 		// 查找正下方（同 X）的交叉点
 		var below []int
 		for j := i + 1; j < n; j++ {
-			if math.Abs(intersections[j].Point.X-pt.X) < 3.0 && intersections[j].Point.Y > pt.Y {
+				if math.Abs(intersections[j].Point.X-pt.X) < xTol && intersections[j].Point.Y > pt.Y {
 				below = append(below, j)
 			}
 		}
@@ -47,7 +47,7 @@ func BuildCells(intersections []Intersection) []model.Cell {
 		// 查找正右方（同 Y）的交叉点
 		var right []int
 		for j := i + 1; j < n; j++ {
-			if math.Abs(intersections[j].Point.Y-pt.Y) < 3.0 && intersections[j].Point.X > pt.X {
+				if math.Abs(intersections[j].Point.Y-pt.Y) < yTol && intersections[j].Point.X > pt.X {
 				right = append(right, j)
 			}
 		}
@@ -237,8 +237,8 @@ func buildTableFromCells(cells []model.Cell, indices []int) model.Table {
 	}
 
 	// 排序得到列和行的量化边界
-	xs := sortedIntKeys(xSet)
-	ys := sortedIntKeys(ySet)
+		xs := snapSortedInts(sortedIntKeys(xSet), 5) // 合并相近的列边界
+		ys := snapSortedInts(sortedIntKeys(ySet), 5) // 合并相近的行边界
 
 	// 构建量化坐标到索引的映射
 	xIndex := make(map[int]int)
@@ -316,4 +316,27 @@ func sortedIntKeys(m map[int]bool) []int {
 	}
 	sort.Ints(keys)
 	return keys
+}
+
+// snapSortedInts 将排序后的整数列表中差距小于阈值的相邻值合并为平均值。
+// 用于消除因浮点误差或单元格拆分产生的多余网格线。
+func snapSortedInts(vals []int, tolerance int) []int {
+	if len(vals) <= 1 {
+		return vals
+	}
+	var result []int
+	groupSum := vals[0]
+	groupCount := 1
+	for i := 1; i < len(vals); i++ {
+		if vals[i]-vals[i-1] <= tolerance {
+			groupSum += vals[i]
+			groupCount++
+		} else {
+			result = append(result, groupSum/groupCount)
+			groupSum = vals[i]
+			groupCount = 1
+		}
+	}
+	result = append(result, groupSum/groupCount)
+	return result
 }

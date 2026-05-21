@@ -98,7 +98,7 @@ func SnapEdges(edges []Edge, tolerance float64) []Edge {
 	// 垂直边按 X 坐标捕捉
 	result = append(result, snapParallel(vEdges, tolerance, func(e Edge) float64 { return e.X0 }, func(e Edge, v float64) Edge {
 		dx := v - e.X0
-		return Edge{e.Orientation, e.X0 + dx, e.Y0, e.X1 + dx, e.Y1 + dx}
+		return Edge{e.Orientation, e.X0 + dx, e.Y0, e.X1 + dx, e.Y1}
 	})...)
 	return result
 }

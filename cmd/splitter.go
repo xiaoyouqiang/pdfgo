@@ -82,7 +82,7 @@ func main() {
 	// Apply secondary splitting for large blocks (preserve tables and links)
 	secondaryChunkSize := 256 // Smaller chunk size for secondary splitting
 	secondaryOverlap := 12    // Overlap for context
-	results = split.SplitLargeBlocks(results, secondaryChunkSize, secondaryOverlap)
+	results = split.SplitLargeBlocks(results, secondaryChunkSize, secondaryOverlap, false)
 
 	fmt.Printf("Split into %d segments (after secondary split)\n", len(results))
 

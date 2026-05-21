@@ -113,7 +113,7 @@ func parsebfrange(data []byte, cmap *CMap) error {
 			}
 			startCode := parseHex(string(pairs[0][1]))
 			endCode := parseHex(string(pairs[1][1]))
-			if startCode < 0 || endCode < 0 || startCode > endCode {
+			if startCode < 0 || endCode < 0 || startCode > endCode || endCode-startCode > 65536 {
 				continue
 			}
 			// PDF 规范 bfrange 有两种格式：
@@ -174,7 +174,7 @@ func (c *CMap) CodeBytes() int {
 	if c.codeLength <= 2 {
 		return 1
 	}
-	return c.codeLength / 2
+	return (c.codeLength + 1) / 2
 }
 
 func (c *CMap) DecodeSingle(code int) rune {
@@ -183,7 +183,11 @@ func (c *CMap) DecodeSingle(code int) rune {
 	}
 	for _, rm := range c.rangeMappings {
 		if code >= rm.Start && code <= rm.End {
-			return rune(rm.Base + code - rm.Start)
+				decoded := rm.Base + code - rm.Start
+				if decoded < 0 || decoded > 0x10FFFF {
+					return 0
+				}
+				return rune(decoded)
 		}
 	}
 	return 0

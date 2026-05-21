@@ -333,10 +333,10 @@ func (ci *ContentInterpreter) interpretFormXObjectByName(name string) {
 		ci.processingObjs = make(map[int]bool)
 	}
 	objNr := form.ObjNr
-	if objNr > 0 && ci.processingObjs[objNr] {
+	if objNr >= 0 && ci.processingObjs[objNr] {
 		return
 	}
-	if objNr > 0 {
+	if objNr >= 0 {
 		ci.processingObjs[objNr] = true
 		defer func() { delete(ci.processingObjs, objNr) }()
 	}
@@ -417,7 +417,10 @@ func (ci *ContentInterpreter) showString(data []byte) {
 	}
 
 	for i, r := range runes {
-		adv := widths[i]
+			var adv float64
+			if i < len(widths) {
+				adv = widths[i]
+			}
 		if adv == 0 {
 			adv = 0.5
 		}

@@ -7,7 +7,7 @@ import (
 )
 
 // TitleSpecialChars defines special characters to remove from titles
-var TitleSpecialChars = []string{"#", "\n", "\r", "\\s"}
+var TitleSpecialChars = []string{"#", "\n", "\r"}
 
 // SplitResult represents a split paragraph
 type SplitResult struct {
@@ -188,6 +188,14 @@ func (m *SplitModel) isTocContent(line string) bool {
 // 模式：1-150 个任意字符 + 3 个以上点号 + 可选空格 + 数字 + 可选尾随点号/空格
 // 注意：中文字符在 UTF-8 中占 3 字节，所以限制放宽到 150 字节以适应中文标题
 var pdfTocLineRe = regexp.MustCompile(`^.{1,150}[\.。…]{3,} *\d+[\.。… \t]*$`)
+
+// filterSpecialChars 使用的预编译正则
+var (
+	reNewlines = regexp.MustCompile(`\n+`)
+	reSpaces   = regexp.MustCompile(` +`)
+	reHash     = regexp.MustCompile(`#`)
+	reTabs     = regexp.MustCompile(`\t+`)
+)
 
 // isPdfTocLine 检测 PDF 风格的目录条目行。
 // 匹配格式："标题文本……页码" 或单独的 "目录"
@@ -378,7 +386,9 @@ func (m *SplitModel) treeToParagraphs(nodes []*TreeNode) []SplitResult {
 		for _, node := range currentNodes {
 			if node.State == "title" {
 				titleContent := node.Content
-				newChain := append(chain, titleContent)
+				newChain := make([]string, len(chain))
+				copy(newChain, chain)
+				newChain = append(newChain, titleContent)
 
 				// If title has no children (empty content), output title as content so it's not lost
 				if len(node.Children) == 0 {
@@ -475,29 +485,13 @@ func (m *SplitModel) filterTitleSpecialChars(title string) string {
 
 // filterSpecialChars removes special characters from content
 func (m *SplitModel) filterSpecialChars(content string) string {
-	// Don't filter newlines for table content (starts with |)
 	isTable := strings.HasPrefix(content, "|")
 
-	replacements := []*regexp.Regexp{
-		regexp.MustCompile(`\n+`), // Replace multiple newlines with single newline (preserve line breaks)
-		regexp.MustCompile(` +`),  // Replace multiple spaces with single space
-		regexp.MustCompile(`#`),
-		regexp.MustCompile(`\t+`),
+	if !isTable {
+		content = reNewlines.ReplaceAllString(content, "\n")
 	}
-
-	for _, re := range replacements {
-		// Skip newline replacement for tables to preserve row structure
-		if isTable && re.String() == `\n+` {
-			continue
-		}
-		if re.String() == `\n+` {
-			content = re.ReplaceAllString(content, "\n") // Keep newlines, just collapse multiple
-		} else if re.String() == ` +` {
-			content = re.ReplaceAllString(content, " ") // Collapse multiple spaces
-		} else {
-			content = re.ReplaceAllString(content, "")
-		}
-	}
-
-	return strings.TrimSpace(content)
+	content = reSpaces.ReplaceAllString(content, " ")
+	content = reHash.ReplaceAllString(content, "")
+	content = reTabs.ReplaceAllString(content, "")
+	return content
 }

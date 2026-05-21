@@ -94,21 +94,22 @@ func (s *Scanner) skipWhitespace() {
 // Next 读取并返回下一个 token。
 // 根据当前字符判断 token 类型并进行相应的解析。
 func (s *Scanner) Next() (Token, error) {
-	s.skipWhitespace()
-	if s.pos >= len(s.data) {
-		return Token{Type: EOF}, nil
-	}
+	for {
+		s.skipWhitespace()
+		if s.pos >= len(s.data) {
+			return Token{Type: EOF}, nil
+		}
 
 	c := s.data[s.pos]
 	s.pos++
 
 	switch c {
 	case '%':
-		// 注释行 — 跳到行尾后递归读取下一个 token
+		// 注释行 — 跳到行尾后跳过后继续循环读取下一个 token
 		for s.pos < len(s.data) && s.data[s.pos] != 10 && s.data[s.pos] != 13 {
 			s.pos++
 		}
-		return s.Next()
+		continue
 
 	case '/':
 		// 名称对象，如 /F1、/R7
@@ -141,6 +142,9 @@ func (s *Scanner) Next() (Token, error) {
 			}
 			s.pos++
 		}
+		if s.pos <= start {
+			return Token{Type: Literal, Value: ""}, nil
+		}
 		str := string(s.data[start : s.pos-1])
 		// 使用逐字符反转义，避免 ReplaceAll 的顺序问题
 		str = unescapeLiteral(str)
@@ -159,6 +163,9 @@ func (s *Scanner) Next() (Token, error) {
 			s.pos++
 		}
 		s.pos++ // 跳过 >
+		if s.pos-1 < start {
+			return Token{Type: HexLiteral, Value: ""}, nil
+		}
 		hex := string(s.data[start:s.pos-1])
 		// 移除所有空白字符（空格、换行、回车、制表符等 PDF 规范允许的分隔符）
 		hex = strings.Map(func(r rune) rune {
@@ -206,6 +213,7 @@ func (s *Scanner) Next() (Token, error) {
 		s.pos--
 		return s.scanNumber()
 	}
+}
 }
 
 // peek 查看下一个字节但不移动位置

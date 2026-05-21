@@ -980,9 +980,10 @@ func (d *Document) SaveImages(outputDir string, prefix string, useUniqueName boo
 		fullPath := filepath.Join(absOutputDir, filename)
 
 		// 安全校验：确保最终路径仍在输出目录内，防止路径穿越攻击
-		if !strings.HasPrefix(fullPath, absOutputDir+string(os.PathSeparator)) {
-			return fmt.Errorf("invalid image filename (path traversal detected): %s", img.Filename)
-		}
+			rel, err := filepath.Rel(absOutputDir, fullPath)
+			if err != nil || strings.HasPrefix(rel, "..") || filepath.IsAbs(rel) {
+				return fmt.Errorf("invalid image filename (path traversal detected): %s", img.Filename)
+			}
 
 		if err := os.WriteFile(fullPath, img.Data, 0644); err != nil {
 			return fmt.Errorf("failed to write image %d: %w", i, err)
@@ -1003,7 +1004,11 @@ func (d *Document) GetImageMarkdown(content string) string {
 	// 构建文件名到自身的映射（用于占位符替换）
 	ridToFilename := make(map[string]string)
 	for _, img := range d.Images {
-		ridToFilename[img.ID] = img.Filename
+			filename := img.Filename
+			if img.SavedFilename != "" {
+				filename = img.SavedFilename
+			}
+			ridToFilename[img.ID] = filename
 	}
 
 	// 匹配 {{IMAGE:xxx}} 格式的占位符并替换为 Markdown 图片语法

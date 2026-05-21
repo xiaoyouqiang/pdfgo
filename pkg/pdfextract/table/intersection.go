@@ -94,11 +94,12 @@ func FindIntersections(edges []Edge, xTol, yTol float64) []Intersection {
 			VEdges: a.vEdges,
 		})
 	}
-	sort.Slice(result, func(i, j int) bool {
-		if result[i].Point.X != result[j].Point.X {
-			return result[i].Point.X < result[j].Point.X
-		}
-		return result[i].Point.Y < result[j].Point.Y
-	})
+		sort.Slice(result, func(i, j int) bool {
+			dx := result[i].Point.X - result[j].Point.X
+			if math.Abs(dx) > 0.001 {
+				return dx < 0
+			}
+			return result[i].Point.Y < result[j].Point.Y
+		})
 	return result
 }

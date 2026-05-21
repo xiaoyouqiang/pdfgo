@@ -497,9 +497,9 @@ func bboxKey(r model.Rect) [4]int {
 // extractTocEntries scans all pages for TOC lines and extracts entry titles and levels.
 func extractTocEntries(pages []model.Page) []tocEntry {
 	var entries []tocEntry
-	seen := make(map[string]bool)
+	seen := make(map[[2]interface{}]bool)
 
-	for _, page := range pages {
+	for pgNum, page := range pages {
 		for _, tb := range page.TextBoxes {
 			for _, line := range tb.Lines {
 				text := strings.TrimSpace(line.Text())
@@ -511,10 +511,10 @@ func extractTocEntries(pages []model.Page) []tocEntry {
 					continue
 				}
 				title := strings.TrimSpace(m[1])
-				if title == "" || seen[title] {
+				if title == "" || seen[[2]interface{}{title, pgNum}] {
 					continue
 				}
-				seen[title] = true
+				seen[[2]interface{}{title, pgNum}] = true
 
 				level := 1
 				if nm := headingNumRe.FindStringSubmatch(title); nm != nil {

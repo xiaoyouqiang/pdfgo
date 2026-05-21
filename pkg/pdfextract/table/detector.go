@@ -120,7 +120,7 @@ func detectFromEdges(edges []Edge, chars []model.Char, settings TableSettings) [
 	}
 
 	// 第五步：从交叉点构建单元格
-	cells := BuildCells(intersections)
+	cells := BuildCells(intersections, settings.IntersectionXTol, settings.IntersectionYTol)
 	if len(cells) == 0 {
 		return nil
 	}
