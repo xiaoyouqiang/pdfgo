@@ -11,13 +11,14 @@ var TitleSpecialChars = []string{"#", "\n", "\r"}
 
 // SplitResult represents a split paragraph
 type SplitResult struct {
-	Title       string   `json:"title"`
-	Content     string   `json:"content"`
-	Keywords    []string `json:"keywords"`
-	ParentChain []string `json:"parent_chain"`
-	Level       int      `json:"level"`
-	OriginLevel int      `json:"originLevel"` //原始level
-	ParentIndex int      `json:"parentIndex"`
+	Title            string   `json:"title"`
+	Content          string   `json:"content"`
+	Keywords         []string `json:"keywords"`
+	ParentChain      []string `json:"parent_chain"`
+	Level            int      `json:"level"`
+	OriginLevel      int      `json:"originLevel"` //原始level
+	ParentIndex      int      `json:"parentIndex"`
+	ParentTrunkIdKwd string   `json:"parent_trunk_id_kwd"`
 }
 
 // TreeNode represents a node in the document tree
@@ -485,13 +486,29 @@ func (m *SplitModel) filterTitleSpecialChars(title string) string {
 
 // filterSpecialChars removes special characters from content
 func (m *SplitModel) filterSpecialChars(content string) string {
+	// Don't filter newlines for table content (starts with |)
 	isTable := strings.HasPrefix(content, "|")
 
-	if !isTable {
-		content = reNewlines.ReplaceAllString(content, "\n")
+	replacements := []*regexp.Regexp{
+		regexp.MustCompile(`\n+`), // Replace multiple newlines with single newline (preserve line breaks)
+		regexp.MustCompile(` +`),  // Replace multiple spaces with single space
+		regexp.MustCompile(`#`),
+		regexp.MustCompile(`\t+`),
 	}
-	content = reSpaces.ReplaceAllString(content, " ")
-	content = reHash.ReplaceAllString(content, "")
-	content = reTabs.ReplaceAllString(content, "")
-	return content
+
+	for _, re := range replacements {
+		// Skip newline replacement for tables to preserve row structure
+		if isTable && re.String() == `\n+` {
+			continue
+		}
+		if re.String() == `\n+` {
+			content = re.ReplaceAllString(content, "\n") // Keep newlines, just collapse multiple
+		} else if re.String() == ` +` {
+			content = re.ReplaceAllString(content, " ") // Collapse multiple spaces
+		} else {
+			content = re.ReplaceAllString(content, "")
+		}
+	}
+
+	return strings.TrimSpace(content)
 }
