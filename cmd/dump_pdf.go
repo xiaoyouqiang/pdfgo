@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"github.com/xiaoyouqiang/pdfgo/pkg/debug"
 	"os"
 
 	"github.com/xiaoyouqiang/pdfgo/pkg/pdfextract"
@@ -24,6 +25,8 @@ func main() {
 		ExtractImage: true,
 	})
 	result, err := e.ExtractFile(path)
+
+	debug.VarDump(result.Title)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)

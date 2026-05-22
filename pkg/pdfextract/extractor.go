@@ -20,8 +20,8 @@ import (
 	"io"
 	"math"
 	"os"
-	"sort"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/google/uuid"
@@ -460,8 +460,8 @@ func hasOverlapInLine(chars []model.Char) bool {
 
 	// 检查不同字体的字符在 X 方向是否重叠
 	type fontSpan struct {
-		font     string
-		x0, x1   float64
+		font   string
+		x0, x1 float64
 	}
 	spans := make(map[string]*fontSpan)
 	for _, c := range chars {
@@ -505,9 +505,9 @@ func hasOverlapInLine(chars []model.Char) bool {
 // 移除平均 SeqNo 较小的组在重叠区域内的字符。
 func (e *Extractor) dedupLine(chars []model.Char) []model.Char {
 	type fontGroup struct {
-		font      string
-		chars     []model.Char
-		x0, x1    float64
+		font   string
+		chars  []model.Char
+		x0, x1 float64
 	}
 	groupMap := make(map[string]*fontGroup)
 	for _, c := range chars {
@@ -588,21 +588,21 @@ func (e *Extractor) dedupLine(chars []model.Char) []model.Char {
 			if laterOnlyWhitespace {
 				continue
 			}
-				// 如果先绘制组在重叠区域内包含非空白可读文本，
-				// 且两组都有实质内容，不做去重以避免误删正常文本。
-				earlierOnlyWhitespace := true
-				for _, c := range earlier.chars {
-					if c.Origin.X >= overlapX0-2.0 && c.Origin.X <= overlapX1+2.0 {
-						if strings.TrimSpace(c.Text) != "" {
-							earlierOnlyWhitespace = false
-							break
-						}
+			// 如果先绘制组在重叠区域内包含非空白可读文本，
+			// 且两组都有实质内容，不做去重以避免误删正常文本。
+			earlierOnlyWhitespace := true
+			for _, c := range earlier.chars {
+				if c.Origin.X >= overlapX0-2.0 && c.Origin.X <= overlapX1+2.0 {
+					if strings.TrimSpace(c.Text) != "" {
+						earlierOnlyWhitespace = false
+						break
 					}
 				}
-				if !earlierOnlyWhitespace && !laterOnlyWhitespace {
-					// 两组都有实质内容，可能不是双层渲染覆盖，跳过去重
-					continue
-				}
+			}
+			if !earlierOnlyWhitespace && !laterOnlyWhitespace {
+				// 两组都有实质内容，可能不是双层渲染覆盖，跳过去重
+				continue
+			}
 			// 移除先绘制组在重叠区域内的字符
 			for _, c := range earlier.chars {
 				if c.Origin.X >= overlapX0-2.0 && c.Origin.X <= overlapX1+2.0 {
@@ -935,10 +935,10 @@ func (e *Extractor) extractImages(ctx *pdfcpuModel.Context, pageNum int, placeme
 		var data []byte
 		if img.Reader != nil {
 			var err error
-				data, err = io.ReadAll(io.LimitReader(img.Reader, 100<<20))
-				if err != nil {
-					continue
-				}
+			data, err = io.ReadAll(io.LimitReader(img.Reader, 100<<20))
+			if err != nil {
+				continue
+			}
 		}
 		if len(data) == 0 {
 			continue
@@ -1025,25 +1025,37 @@ func detectTitle(pages []model.Page) string {
 	pageMidX := firstPage.Width / 2
 	tolerance := firstPage.Width * 0.10 // 居中容差：页面宽度的 10%
 
-	// 取第一个非页眉页脚的非空文本行
+	// 收集第一页所有非页眉页脚的文本行
+	type titleCandidate struct {
+		text string
+		y    float64
+		midX float64
+	}
+	var candidates []titleCandidate
 	for _, tb := range firstPage.TextBoxes {
 		for _, line := range tb.Lines {
 			text := strings.TrimSpace(line.Text())
 			if text == "" {
 				continue
 			}
-			// 跳过页眉页脚
 			if headerFooterSet[normalizeTitleText(text)] {
 				continue
 			}
-			// 找到第一个有效行，判断是否居中
-			lineMidX := (line.BBox.X0 + line.BBox.X1) / 2
-			if math.Abs(lineMidX-pageMidX) <= tolerance {
-				return text
-			}
-			// 第一个有效行不居中，说明文档没有标题
-			return ""
+			midX := (line.BBox.X0 + line.BBox.X1) / 2
+			candidates = append(candidates, titleCandidate{text, line.BBox.Y0, midX})
 		}
+	}
+	if len(candidates) == 0 {
+		return ""
+	}
+	// 按 Y 降序排序（PDF 坐标系 Y 向上，高 Y = 页面顶部）
+	sort.Slice(candidates, func(i, j int) bool {
+		return candidates[i].y > candidates[j].y
+	})
+	// 取页面顶部第一个非页眉页脚行，判断是否居中
+	c := candidates[0]
+	if math.Abs(c.midX-pageMidX) <= tolerance {
+		return c.text
 	}
 	return ""
 }
