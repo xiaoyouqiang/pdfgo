@@ -335,6 +335,19 @@ func writeTextBoxMarkdown(sb *strings.Builder, tb model.TextBox, bodySize float6
 			}
 		}
 
+			// 回退：基于编号模式检测 TOC 中未收录的子标题
+			// 当正文中出现形如 "6.1.1 标题" 的编号行，且其前缀（如 "6.1"）
+			// 存在于 TOC 中，但该编号本身不在 TOC 中时，按编号深度推断标题层级
+			if len(tocEntries) > 0 && !isTOC {
+				if level := matchPatternHeading(text, tocEntries); level > 0 {
+					sb.WriteString(strings.Repeat("#", level+1))
+					sb.WriteString(" ")
+					sb.WriteString(text)
+					sb.WriteString("\n\n")
+					continue
+				}
+			}
+
 		fs := lineFontSize(line)
 
 		if len(tiers) > 0 {
@@ -649,4 +662,50 @@ func cleanTocDots(text string) string {
 	// Step 2: 移除页码数字后的多余点号
 	text = trailingDotsRe.ReplaceAllString(text, "$1")
 	return text
+}
+
+// matchPatternHeading 基于编号模式检测 TOC 中未收录的子标题。
+//
+// 当正文中出现形如 "6.1.1 标题" 的编号行时：
+//   - 如果编号本身不在 TOC 中，但存在更浅层的前缀（如 "6.1"）在 TOC 中
+//   - 则根据编号中的点号数量推断标题层级
+//
+// 例如：TOC 中有 "6.1"（level 2），正文中出现 "6.1.1 标题"
+//
+//	→ "6.1.1" 不在 TOC，但前缀 "6.1" 在 TOC → 推断 level=3 → 输出 ####
+func matchPatternHeading(text string, tocEntries []tocEntry) int {
+	normText := normalizeHeadingText(text)
+	textNum := extractHeadingNum(normText)
+	if textNum == "" {
+		return 0
+	}
+	// 必须包含至少一个点号（排除纯数字如 "6 Title"）
+	if !strings.Contains(textNum, ".") {
+		return 0
+	}
+	// 如果编号已在 TOC 中，不需要模式检测（TOC 匹配会处理）
+	for _, entry := range tocEntries {
+		entryNum := extractHeadingNum(normalizeHeadingText(entry.title))
+		if entryNum == textNum {
+			return 0
+		}
+	}
+	// 检查编号前缀是否存在于 TOC 中
+	// 例如 "6.1.1" → 检查 "6.1" 是否在 TOC，再检查 "6"
+	prefix := textNum
+	for {
+		lastDot := strings.LastIndex(prefix, ".")
+		if lastDot < 0 {
+			break
+		}
+		prefix = prefix[:lastDot]
+		for _, entry := range tocEntries {
+			entryNum := extractHeadingNum(normalizeHeadingText(entry.title))
+			if entryNum == prefix {
+				dots := strings.Count(textNum, ".")
+				return dots + 1
+			}
+		}
+	}
+	return 0
 }
