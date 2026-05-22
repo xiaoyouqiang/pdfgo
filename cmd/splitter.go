@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"github.com/xiaoyouqiang/pdfgo/pkg/debug"
 	"log"
 	"os"
 
@@ -51,7 +52,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to parse document: %v", err)
 	}
-
+	debug.VarDump(doc.Title)
 	//fmt.Printf("%v", doc.Tables)
 
 	fmt.Printf("Document parsed: %d paragraphs, %d tables, %d images\n", len(doc.Paragraphs), len(doc.Tables), len(doc.Images))

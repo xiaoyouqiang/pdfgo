@@ -112,6 +112,8 @@ func detectFromEdges(edges []Edge, chars []model.Char, settings TableSettings) [
 	merged := SnapEdges(filtered, settings.SnapTolerance)
 	// 第三步：合并（将共线且重叠的边合并为一条长边）
 	merged = JoinEdges(merged, settings.JoinTolerance)
+	// 第三步半：移除装饰性水平线（如双语表头中的分隔线）
+	merged = filterDecorativeHEdges(merged, 30.0, 5.0)
 
 	// 第四步：查找所有水平边和垂直边的交叉点
 	intersections := FindIntersections(merged, settings.IntersectionXTol, settings.IntersectionYTol)
@@ -125,7 +127,8 @@ func detectFromEdges(edges []Edge, chars []model.Char, settings TableSettings) [
 		return nil
 	}
 
-	// 过滤过小的单元格
+			
+	// 过滤过小的单元格// 过滤过小的单元格
 	var filteredCells []model.Cell
 	for _, c := range cells {
 		if c.BBox.Width() >= settings.MinCellWidth && c.BBox.Height() >= settings.MinCellHeight {
@@ -210,6 +213,145 @@ func reverseRowOrder(tbl model.Table) model.Table {
 		BBox:  tbl.BBox,
 		Cells: grid,
 		Rows:  tbl.Rows,
+		Cols:  tbl.Cols,
+	}
+}
+
+// splitMergedTables 检测并拆分因共享边框而被错误合并的表格。
+// 算法：将单元格按 Y 坐标分行，计算相邻行的 X 边界重叠率，
+// 如果重叠率骤降，说明列结构发生跳变，在此处拆分。
+func splitMergedTables(tables []model.Table) []model.Table {
+	var result []model.Table
+	for _, tbl := range tables {
+		splits := splitByColumnDiscontinuity(tbl)
+		result = append(result, splits...)
+	}
+	return result
+}
+
+// splitByColumnDiscontinuity 分析表格中每行的 X 边界集合，
+// 在相邻行 X 边界重叠率骤降处拆分表格。
+func splitByColumnDiscontinuity(tbl model.Table) []model.Table {
+	if tbl.Rows <= 2 {
+		return []model.Table{tbl}
+	}
+
+	// 1. 提取每行的 X 边界集合（量化后 snap 消除浮点噪声）
+	const q = 10.0
+	const snapTol = 5
+	rowXBorders := make([]map[int]bool, tbl.Rows)
+	for r := 0; r < tbl.Rows; r++ {
+		rowXBorders[r] = make(map[int]bool)
+		for c := 0; c < tbl.Cols; c++ {
+			cell := tbl.Cells[r][c]
+			if !cell.BBox.Empty() {
+				x0 := int(math.Round(cell.BBox.X0 * q))
+				x1 := int(math.Round(cell.BBox.X1 * q))
+				rowXBorders[r][x0] = true
+				rowXBorders[r][x1] = true
+			}
+		}
+	}
+
+	// 2. 对每行的 X 边界做 snap 合并
+	for r := range rowXBorders {
+		keys := sortedIntKeys(rowXBorders[r])
+		snapped := snapSortedInts(keys, snapTol)
+		m := make(map[int]bool, len(snapped))
+		for _, k := range snapped {
+			m[k] = true
+		}
+		rowXBorders[r] = m
+	}
+
+	// 3. 计算相邻行的 X 边界重叠率 (Jaccard)
+	overlapRatios := make([]float64, tbl.Rows-1)
+	for r := 0; r < tbl.Rows-1; r++ {
+		setA := rowXBorders[r]
+		setB := rowXBorders[r+1]
+		intersection := 0
+		for k := range setA {
+			if setB[k] {
+				intersection++
+			}
+		}
+		union := len(setA) + len(setB) - intersection
+		if union == 0 {
+			overlapRatios[r] = 1.0
+		} else {
+			overlapRatios[r] = float64(intersection) / float64(union)
+		}
+	}
+
+	// 4. 找到重叠率骤降的位置作为拆分点
+	var validRatios []float64
+	for _, ratio := range overlapRatios {
+		validRatios = append(validRatios, ratio)
+	}
+	sort.Float64s(validRatios)
+	medianRatio := validRatios[len(validRatios)/2]
+
+	// 阈值: 重叠率 < 中位数的 40% 且 < 0.5
+	var splitAfter []int
+	for r, ratio := range overlapRatios {
+		if ratio < medianRatio*0.4 && ratio < 0.5 {
+			splitAfter = append(splitAfter, r)
+		}
+	}
+
+	if len(splitAfter) == 0 {
+		return []model.Table{tbl}
+	}
+
+	// 5. 按拆分点切割
+	var result []model.Table
+	prev := 0
+	for _, sp := range splitAfter {
+		if sp+1-prev >= 1 {
+			result = append(result, extractSubTable(tbl, prev, sp+1))
+		}
+		prev = sp + 1
+	}
+	if tbl.Rows-prev >= 1 {
+		result = append(result, extractSubTable(tbl, prev, tbl.Rows))
+	}
+
+	if len(result) <= 1 {
+		return []model.Table{tbl}
+	}
+	return result
+}
+
+// extractSubTable 从表格中提取指定行范围的子表格。
+func extractSubTable(tbl model.Table, startRow, endRow int) model.Table {
+	rows := endRow - startRow
+	grid := make([][]model.Cell, rows)
+	var bbox model.Rect
+	first := true
+	for r := 0; r < rows; r++ {
+		grid[r] = make([]model.Cell, tbl.Cols)
+		for c := 0; c < tbl.Cols; c++ {
+			cell := tbl.Cells[startRow+r][c]
+			cell.Row = r
+			cell.Col = c
+			grid[r][c] = cell
+			if !cell.BBox.Empty() {
+				if first {
+					bbox = cell.BBox
+					first = false
+				} else {
+					bbox.X0 = math.Min(bbox.X0, cell.BBox.X0)
+					bbox.Y0 = math.Min(bbox.Y0, cell.BBox.Y0)
+					bbox.X1 = math.Max(bbox.X1, cell.BBox.X1)
+					bbox.Y1 = math.Max(bbox.Y1, cell.BBox.Y1)
+				}
+			}
+		}
+	}
+	return model.Table{
+		BBox:  bbox,
+		Cells: grid,
+		Rows:  rows,
 		Cols:  tbl.Cols,
 	}
 }

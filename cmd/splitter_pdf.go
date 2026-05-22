@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"github.com/xiaoyouqiang/pdfgo/pkg/debug"
 	"log"
 	"os"
 
@@ -115,6 +116,7 @@ func SplitPDFDocument(filePath string, imageDir string, imagePrefix string, limi
 	if err != nil {
 		return nil, fmt.Errorf("failed to extract PDF: %w", err)
 	}
+	debug.VarDump(result.Title)
 	pages := result.Pages
 
 	// 如果指定了图片目录，将提取的图片保存到文件

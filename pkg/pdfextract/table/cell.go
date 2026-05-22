@@ -214,7 +214,13 @@ func GroupCells(cells []model.Cell) []model.Table {
 
 		// 至少需要 2 个单元格才能构成表格
 		if len(currentCells) > 1 {
-			tables = append(tables, buildTableFromCells(cells, currentCells))
+			// 检测列结构不连续，在不连续处拆分单元格组
+			subGroups := splitCellGroupByColumnStructure(cells, currentCells)
+			for _, sg := range subGroups {
+				if len(sg) > 1 {
+					tables = append(tables, buildTableFromCells(cells, sg))
+				}
+			}
 		}
 	}
 
@@ -339,4 +345,134 @@ func snapSortedInts(vals []int, tolerance int) []int {
 	}
 	result = append(result, groupSum/groupCount)
 	return result
+}
+
+// splitCellGroupByColumnStructure 检测单元格组内的列结构不连续性，并拆分。
+// 将单元格按 Y 坐标分行，计算相邻行的 X 边界 Jaccard 重叠率，
+// 重叠率骤降处视为两个独立表格的分界。
+func splitCellGroupByColumnStructure(cells []model.Cell, indices []int) [][]int {
+	if len(indices) <= 2 {
+		return [][]int{indices}
+	}
+
+	const q = 10.0
+	const snapTol = 5
+
+	// 1. 按 Y0 坐标将单元格分行
+	type cellRow struct {
+		yKey   int
+		indices []int
+	}
+	rowMap := make(map[int][]int)
+	for _, idx := range indices {
+		yKey := int(math.Round(cells[idx].BBox.Y0 * q))
+		rowMap[yKey] = append(rowMap[yKey], idx)
+	}
+	yKeys := sortedIntKeys2(rowMap)
+	if len(yKeys) <= 1 {
+		return [][]int{indices}
+	}
+
+	// 2. 计算每行的 X 边界集合（snap 后）
+	rowXSets := make([]map[int]bool, len(yKeys))
+	for ri, yk := range yKeys {
+		xSet := make(map[int]bool)
+		for _, idx := range rowMap[yk] {
+			x0 := int(math.Round(cells[idx].BBox.X0 * q))
+			x1 := int(math.Round(cells[idx].BBox.X1 * q))
+			xSet[x0] = true
+			xSet[x1] = true
+		}
+		// snap
+		keys := sortedIntKeys2(xSet)
+		snapped := snapSortedInts(keys, snapTol)
+		m := make(map[int]bool, len(snapped))
+		for _, k := range snapped {
+			m[k] = true
+		}
+		rowXSets[ri] = m
+	}
+
+	// 3. 计算相邻行 Jaccard 重叠率
+	overlapRatios := make([]float64, len(yKeys)-1)
+	for i := 0; i < len(yKeys)-1; i++ {
+		setA := rowXSets[i]
+		setB := rowXSets[i+1]
+		intersection := 0
+		for k := range setA {
+			if setB[k] {
+				intersection++
+			}
+		}
+		union := len(setA) + len(setB) - intersection
+		if union == 0 {
+			overlapRatios[i] = 1.0
+		} else {
+			overlapRatios[i] = float64(intersection) / float64(union)
+		}
+	}
+
+	// 4. 找拆分点
+	var validRatios []float64
+	for _, r := range overlapRatios {
+		validRatios = append(validRatios, r)
+	}
+	sort.Float64s(validRatios)
+	medianRatio := validRatios[len(validRatios)/2]
+
+	// 阈值: 重叠率 < 中位数*0.4 且 < 0.5
+	var splitAfter []int // 在第 i 行之后拆分
+	for i, ratio := range overlapRatios {
+		if ratio < medianRatio*0.4 && ratio < 0.5 {
+			splitAfter = append(splitAfter, i)
+		}
+	}
+
+	if len(splitAfter) == 0 {
+		return [][]int{indices}
+	}
+
+	// 5. 按拆分点切割
+	var result [][]int
+	prev := 0
+	for _, sp := range splitAfter {
+		var group []int
+		for ri := prev; ri <= sp; ri++ {
+			group = append(group, rowMap[yKeys[ri]]...)
+		}
+		result = append(result, group)
+		prev = sp + 1
+	}
+	// 剩余行
+	var group []int
+	for ri := prev; ri < len(yKeys); ri++ {
+		group = append(group, rowMap[yKeys[ri]]...)
+	}
+	result = append(result, group)
+
+	if len(result) <= 1 {
+		return [][]int{indices}
+	}
+	return result
+}
+
+// sortedIntKeys2 returns sorted keys from map[int][]int or map[int]bool
+func sortedIntKeys2(m interface{}) []int {
+	switch v := m.(type) {
+	case map[int][]int:
+		keys := make([]int, 0, len(v))
+		for k := range v {
+			keys = append(keys, k)
+		}
+		sort.Ints(keys)
+		return keys
+	case map[int]bool:
+		keys := make([]int, 0, len(v))
+		for k := range v {
+			keys = append(keys, k)
+		}
+		sort.Ints(keys)
+		return keys
+	}
+	return nil
 }

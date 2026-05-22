@@ -29,13 +29,8 @@ func main() {
 
 	md := pdfextract.PagesToMarkdown(pages)
 
-	// Print first 3000 chars
-	if len(md) > 3000 {
-		fmt.Print(md[:3000])
-		fmt.Printf("\n\n... [total %d chars]\n", len(md))
-	} else {
-		fmt.Print(md)
-	}
+	// Print all
+	fmt.Print(md)
 
 	// Stats
 	fmt.Printf("\n--- Stats ---\n")

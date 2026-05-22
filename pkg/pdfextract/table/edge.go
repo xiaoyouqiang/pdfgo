@@ -229,6 +229,65 @@ func joinParallel(edges []Edge, tolerance float64,
 // ivPair 表示一个闭区间 [lo, hi]
 type ivPair struct{ lo, hi float64 }
 
+// filterDecorativeHEdges 移除单元格内部的装饰性水平线。
+// 装饰线（如双语表头中分隔中英文的水平细线）会被误识别为单元格边界，
+// 导致表头被拆成多行。本函数通过"夹层"检测识别装饰线：
+// 如果一条水平边被两条更宽的上下水平边夹在中间，则判定为装饰线并移除。
+func filterDecorativeHEdges(edges []Edge, yTol, minExtension float64) []Edge {
+	var hEdges, vEdges []Edge
+	for _, e := range edges {
+		if e.Orientation == Horizontal {
+			hEdges = append(hEdges, e)
+		} else {
+			vEdges = append(vEdges, e)
+		}
+	}
+
+	decorative := make(map[int]bool)
+	for i, h := range hEdges {
+		var hasWiderAbove, hasWiderBelow bool
+		for j, other := range hEdges {
+			if i == j {
+				continue
+			}
+			dy := h.Y0 - other.Y0
+			ady := math.Abs(dy)
+			if ady > yTol || ady < 0.5 {
+				continue
+			}
+			// 检查 h 的 X 范围是否是 other 的子集
+			if !(other.X0 <= h.X0+3.0 && other.X1 >= h.X1-3.0) {
+				continue
+			}
+			// other 至少在一侧延伸超过 h 足够距离
+			leftExt := h.X0 - other.X0
+			rightExt := other.X1 - h.X1
+			if leftExt < minExtension && rightExt < minExtension {
+				continue
+			}
+			if dy > 0 { // h 在 other 下方（other 在上方）
+				hasWiderAbove = true
+			} else { // h 在 other 上方（other 在下方）
+				hasWiderBelow = true
+			}
+		}
+		if hasWiderAbove && hasWiderBelow {
+			decorative[i] = true
+		}
+	}
+
+	var result []Edge
+	for _, e := range vEdges {
+		result = append(result, e)
+	}
+	for i, e := range hEdges {
+		if !decorative[i] {
+			result = append(result, e)
+		}
+	}
+	return result
+}
+
 // mergeIntervals 合并重叠或相邻的区间。
 // 类似于 LeetCode "Merge Intervals" 问题。
 func mergeIntervals(ivs []ivPair, tol float64) []ivPair {
