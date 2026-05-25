@@ -141,13 +141,14 @@ func (e *Extractor) ExtractReader(r io.ReadSeeker) (*model.ExtractionResult, err
 // extractPage 提取单页 PDF 的内容。
 //
 // 处理流程：
-//  1. 获取页面字典和属性（尺寸、资源等）
+//  1. 获取页面字典和属性（尺寸、旋转角度、资源等）
 //  2. 读取页面内容流字节
 //  3. 构建字体解析器，解析页面中使用的所有字体
 //  4. 运行内容流解释器，提取字符、矩形、线段等原始数据
-//  5. 运行表格检测器（如启用）
-//  6. 构建文本框（排除表格区域的字符）
-//  7. 提取图片（如启用）
+//  5. 归一化页面旋转（将旋转页面的坐标统一为标准方向）
+//  6. 运行表格检测器（如启用）
+//  7. 构建文本框（排除表格区域的字符）
+//  8. 提取图片（如启用）
 func (e *Extractor) extractPage(ctx *pdfcpuModel.Context, pageNum int) (*model.Page, error) {
 	// 获取页面字典和继承属性
 	pageDict, _, inhPAttrs, err := ctx.PageDict(pageNum, false)
@@ -190,6 +191,18 @@ func (e *Extractor) extractPage(ctx *pdfcpuModel.Context, pageNum int) (*model.P
 		interpreter.SetFormXObjects(formXObjects)
 	}
 	result := interpreter.Interpret(contentBytes)
+
+	// 归一化页面旋转：将旋转页面的字符/矩形/线段/图片坐标
+	// 统一变换为标准方向（Rotate=0），使后续布局分析和表格检测无需关心旋转。
+	rotate := inhPAttrs.Rotate
+	if rotate != 0 {
+		normalizeRotation(result, rotate, width, height)
+		// 90°/270° 旋转后，页面的视觉宽高互换
+		rotate = ((rotate % 360) + 360) % 360
+		if rotate == 90 || rotate == 270 {
+			width, height = height, width
+		}
+	}
 
 	// 表格检测：基于解释器输出的矩形和线段，检测表格结构
 	var tables []model.Table
@@ -239,7 +252,7 @@ func (e *Extractor) extractPage(ctx *pdfcpuModel.Context, pageNum int) (*model.P
 //  1. 从页面资源中查找 Font 字典
 //  2. 遍历每种字体，根据 Subtype 分类处理
 //  3. Type0（CID 复合字体）：调用 buildCIDFont 处理
-//  4. Type1/TrueType/Type3（简单字体）：解析 ToUnicode CMap 和宽度表
+//  4. Type1/TrueType/Type3（简单字体）：解析 ToUnicode CMap、Encoding/Differences 和宽度表
 func (e *Extractor) buildFonts(ctx *pdfcpuModel.Context, resources types.Dict, resolver *font.FontResolver) {
 	if resources == nil {
 		return
@@ -297,6 +310,16 @@ func (e *Extractor) buildFonts(ctx *pdfcpuModel.Context, resources types.Dict, r
 			}
 		}
 
+		// 解析 Encoding 字典或名称（用于没有 ToUnicode 时的字符映射）
+		var encodingMap map[byte]rune
+		if cmap == nil {
+			encodingMap = e.parseSimpleFontEncoding(ctx, fd)
+			// 如果 Encoding 也没有，尝试从嵌入字体程序中提取编码
+			if encodingMap == nil {
+				encodingMap = e.extractFontProgramEncoding(ctx, fd)
+			}
+		}
+
 		// 构建字符宽度映射表（用于计算字符的前进宽度）
 		widths := make(map[byte]float64)
 		if wArr := fd.ArrayEntry("Widths"); len(wArr) > 0 {
@@ -315,14 +338,199 @@ func (e *Extractor) buildFonts(ctx *pdfcpuModel.Context, resources types.Dict, r
 		}
 
 		// 创建简单字体解码器并注册
-		decoder := font.NewSimpleFontDecoder(baseFont, cmap, nil, widths, subtype)
+		decoder := font.NewSimpleFontDecoder(baseFont, cmap, encodingMap, widths, subtype)
 		resolver.Register(name, decoder)
 	}
 }
 
+// parseSimpleFontEncoding 解析简单字体的 Encoding 条目。
+// Encoding 可以是名称（如 "WinAnsiEncoding"）或字典（含 BaseEncoding 和 Differences）。
+// 返回 byte → rune 的编码映射表，解析失败时返回 nil。
+func (e *Extractor) parseSimpleFontEncoding(ctx *pdfcpuModel.Context, fd types.Dict) map[byte]rune {
+	encObj, found := fd.Find("Encoding")
+	if !found || encObj == nil {
+		return nil
+	}
+
+	// 情况 1：Encoding 是名称引用
+	if encRef, ok := encObj.(types.IndirectRef); ok {
+		// 先尝试作为名称解引用
+		if nameObj, err := ctx.Dereference(encRef); err == nil {
+			if name, ok := nameObj.(types.Name); ok {
+				return buildBaseEncoding(string(name))
+			}
+		}
+		// 再尝试作为字典解引用
+		encDict, err := ctx.DereferenceDict(encRef)
+		if err == nil && encDict != nil {
+			return e.parseEncodingDict(ctx, encDict)
+		}
+		return nil
+	}
+
+	// 情况 2：Encoding 是直接名称
+	if name, ok := encObj.(types.Name); ok {
+		return buildBaseEncoding(string(name))
+	}
+
+	// 情况 3：Encoding 是直接字典
+	if encDict, ok := encObj.(types.Dict); ok {
+		return e.parseEncodingDict(ctx, encDict)
+	}
+
+	return nil
+}
+
+// parseEncodingDict 解析 Encoding 字典，包含 BaseEncoding 和 Differences 数组。
+func (e *Extractor) parseEncodingDict(ctx *pdfcpuModel.Context, encDict types.Dict) map[byte]rune {
+	// 从 BaseEncoding 构建基础映射
+	baseMap := make(map[byte]rune)
+	baseName := ""
+	if bn := encDict.NameEntry("BaseEncoding"); bn != nil {
+		baseName = *bn
+	}
+	if baseName != "" {
+		baseMap = buildBaseEncoding(baseName)
+	}
+	if len(baseMap) == 0 {
+		// 没有 BaseEncoding 或无法识别，使用 WinAnsiEncoding 作为默认
+		for i := 0; i < 256; i++ {
+			if font.WinAnsiEncoding[i] != 0 {
+				baseMap[byte(i)] = font.WinAnsiEncoding[i]
+			}
+		}
+	}
+
+	// 解析 Differences 数组：覆盖基础映射中的指定位置
+	diffArr := encDict.ArrayEntry("Differences")
+	if len(diffArr) > 0 {
+		applyDifferences(diffArr, baseMap)
+	}
+
+
+	if len(baseMap) == 0 {
+		return nil
+	}
+	return baseMap
+}
+
+// buildBaseEncoding 根据 PDF 标准编码名称构建 byte → rune 映射。
+func buildBaseEncoding(name string) map[byte]rune {
+	m := make(map[byte]rune)
+	switch name {
+	case "WinAnsiEncoding":
+		for i := 0; i < 256; i++ {
+			if font.WinAnsiEncoding[i] != 0 {
+				m[byte(i)] = font.WinAnsiEncoding[i]
+			}
+		}
+	case "MacRomanEncoding":
+		for i, r := range macRomanEncoding {
+			if r != 0 {
+				m[byte(i)] = r
+			}
+		}
+	case "StandardEncoding":
+		for i, r := range standardEncoding {
+			if r != 0 {
+				m[byte(i)] = r
+			}
+		}
+	default:
+		return nil
+	}
+	return m
+}
+
+// applyDifferences 解析 PDF Differences 数组并应用到编码映射表中。
+// Differences 格式：[code /glyphname /glyphname ... code /glyphname ...]
+// 第一个元素是起始字节码，后续元素是字形名称，字节码依次递增。
+func applyDifferences(diffArr types.Array, encMap map[byte]rune) {
+	i := 0
+	for i < len(diffArr) {
+		// 查找起始字节码
+		code, ok := toIntValue(diffArr[i])
+		if !ok {
+			i++
+			continue
+		}
+		i++
+
+		// 后续的名称元素对应 code, code+1, code+2, ...
+		for i < len(diffArr) {
+			name, ok := toNameValue(diffArr[i])
+			if !ok {
+				break // 遇到数字，说明是下一组
+			}
+			if code >= 0 && code <= 255 {
+				r := font.ResolveGlyph(name)
+				if r > 0 {
+					encMap[byte(code)] = r
+				}
+			}
+			code++
+			i++
+		}
+	}
+}
+
+// extractFontProgramEncoding 尝试从嵌入的字体程序（TrueType FontFile2）中提取编码映射。
+// 作为 Encoding 和 ToUnicode 都不可用时的最终回退。
+func (e *Extractor) extractFontProgramEncoding(ctx *pdfcpuModel.Context, fd types.Dict) map[byte]rune {
+	fontData := e.readFontFileData(ctx, fd)
+	if len(fontData) == 0 {
+		return nil
+	}
+
+	gidToUnicode := font.ParseTTFcmap(fontData)
+	if len(gidToUnicode) == 0 {
+		return nil
+	}
+
+	return font.BuildEncodingFromGIDMapping(gidToUnicode)
+}
+
 // buildCIDFont 构建 Type0（CID）复合字体的解码器。
 // CID 字体使用 ToUnicode CMap 将多字节字符编码映射为 Unicode。
+//
+// 处理流程：
+//  1. 解析 ToUnicode CMap
+//  2. 从 CIDFont 字典解析 DW（默认宽度）和 W（宽度数组）
+//  3. 如果没有 ToUnicode CMap，尝试从嵌入字体程序中提取字符映射
 func (e *Extractor) buildCIDFont(ctx *pdfcpuModel.Context, type0Dict types.Dict, resName string, resolver *font.FontResolver) {
+	baseFont := ""
+	if s := type0Dict.NameEntry("BaseFont"); s != nil {
+		baseFont = *s
+	}
+
+	// 获取编码名称
+	encoding := ""
+	if enc := type0Dict.NameEntry("Encoding"); enc != nil {
+		encoding = *enc
+	}
+
+	// 获取 DescendantFonts 中的 CIDFont 字典
+	var cidDict types.Dict
+	descArr := type0Dict.ArrayEntry("DescendantFonts")
+	if len(descArr) > 0 {
+		if cidRef, ok := descArr[0].(types.IndirectRef); ok {
+			cd, err := ctx.DereferenceDict(cidRef)
+			if err == nil {
+				cidDict = cd
+			}
+		}
+	}
+
+	// 解析 DW（默认宽度）和 W（宽度数组）
+	dw := 1.0
+	var widths map[int]float64
+	if cidDict != nil {
+		if dwVal := cidDict.IntEntry("DW"); dwVal != nil {
+			dw = float64(*dwVal) / 1000.0
+		}
+		widths = e.parseCIDWidthArray(cidDict)
+	}
+
 	// 解析 ToUnicode CMap
 	var cmap *font.CMap
 	if toUniRef := type0Dict.IndirectRefEntry("ToUnicode"); toUniRef != nil {
@@ -333,59 +541,273 @@ func (e *Extractor) buildCIDFont(ctx *pdfcpuModel.Context, type0Dict types.Dict,
 			}
 		}
 	}
-	// 没有 CMap 则无法解码字符，跳过
-	if cmap == nil {
-		// 没有 ToUnicode CMap，尝试使用预定义编码回退
-		encoding := ""
-		if enc := type0Dict.NameEntry("Encoding"); enc != nil {
-			encoding = *enc
-		}
-		if encoding == "" {
-			return
-		}
-		baseFont := ""
-		if s := type0Dict.NameEntry("BaseFont"); s != nil {
-			baseFont = *s
-		}
-		dw := 1.0
-		descArr := type0Dict.ArrayEntry("DescendantFonts")
-		if len(descArr) > 0 {
-			if cidRef, ok := descArr[0].(types.IndirectRef); ok {
-				cidDict, err := ctx.DereferenceDict(cidRef)
-				if err == nil {
-					if dwVal := cidDict.IntEntry("DW"); dwVal != nil {
-						dw = float64(*dwVal) / 1000.0
-					}
-				}
-			}
-		}
+
+	// 有 ToUnicode CMap 的情况
+	if cmap != nil {
+		decoder := font.NewCIDFontDecoder(baseFont, cmap, dw, widths)
+		resolver.Register(resName, decoder)
+		return
+	}
+
+	// 没有 ToUnicode CMap：尝试回退方案
+
+	// 回退方案 1：使用预定义编码（如 GBK）
+	if encoding != "" && isSupportedEncoding(encoding) {
 		decoder := font.NewCIDFontDecoderWithEncoding(baseFont, encoding, dw)
 		resolver.Register(resName, decoder)
 		return
 	}
 
-	baseFont := ""
-	if s := type0Dict.NameEntry("BaseFont"); s != nil {
-		baseFont = *s
+	// 回退方案 2：从嵌入字体程序中提取字符映射
+	// 对于 Identity-H 编码，CID = GID，可以通过 TrueType cmap 反查得到 Unicode
+	fontCmap := e.extractCIDFontProgramCMap(ctx, type0Dict, cidDict)
+	if fontCmap != nil {
+		decoder := font.NewCIDFontDecoder(baseFont, fontCmap, dw, widths)
+		resolver.Register(resName, decoder)
+		return
 	}
 
-	// 获取默认字符宽度（来自 DescendantFonts 中的 CIDFont 字典）
-	dw := 1.0
-	descArr := type0Dict.ArrayEntry("DescendantFonts")
-	if len(descArr) > 0 {
-		if cidRef, ok := descArr[0].(types.IndirectRef); ok {
-			cidDict, err := ctx.DereferenceDict(cidRef)
-			if err == nil {
-				if dwVal := cidDict.IntEntry("DW"); dwVal != nil {
-					dw = float64(*dwVal) / 1000.0
+	// 所有回退都失败，仍然注册一个带 W 宽度信息的解码器（至少宽度准确）
+	if encoding != "" {
+		decoder := font.NewCIDFontDecoderWithEncoding(baseFont, encoding, dw)
+		resolver.Register(resName, decoder)
+	}
+}
+
+// parseCIDWidthArray 解析 CIDFont 字典中的 W 数组，返回 CID → 宽度映射。
+// W 数组格式（两种交替出现）：
+//   - c [w1 w2 ... wn] — 从 CID c 开始的连续 n 个 CID 的宽度
+//   - c c_last w — 从 CID c 到 c_last 的所有 CID 使用相同宽度 w
+//
+// 宽度单位为千分之一，需除以 1000 转换。
+func (e *Extractor) parseCIDWidthArray(cidDict types.Dict) map[int]float64 {
+	wArr := cidDict.ArrayEntry("W")
+	if len(wArr) == 0 {
+		return nil
+	}
+
+	widths := make(map[int]float64)
+	i := 0
+	for i < len(wArr) {
+		// 第一个元素：CID 起始值
+		cid, ok := toIntValue(wArr[i])
+		if !ok {
+			i++
+			continue
+		}
+		i++
+		if i >= len(wArr) {
+			break
+		}
+
+		// 判断下一个元素是数组还是数字
+		switch v := wArr[i].(type) {
+		case types.Array: // c [w1 w2 ...] — 连续 CID 宽度
+			for j, w := range v {
+				wv := toFloatValue(w)
+				if wv > 0 {
+					widths[cid+j] = wv / 1000.0
 				}
 			}
+			i++
+		case types.Integer: // c c_last w — 范围宽度
+			cLast := v.Value()
+			i++
+			if i >= len(wArr) {
+				break
+			}
+			wv := toFloatValue(wArr[i])
+			i++
+			if wv > 0 {
+				for c := cid; c <= cLast; c++ {
+					widths[c] = wv / 1000.0
+				}
+			}
+		default:
+			i++
 		}
 	}
 
-	// 创建 CID 字体解码器并注册
-	decoder := font.NewCIDFontDecoder(baseFont, cmap, dw)
-	resolver.Register(resName, decoder)
+	if len(widths) == 0 {
+		return nil
+	}
+	return widths
+}
+
+// extractCIDFontProgramCMap 从 CID 字体的嵌入字体程序中提取字符映射。
+// 对于 Identity-H 编码的 CID 字体，CID = GID，通过 TrueType cmap 反查 GID → Unicode。
+func (e *Extractor) extractCIDFontProgramCMap(ctx *pdfcpuModel.Context, type0Dict types.Dict, cidDict types.Dict) *font.CMap {
+	// 优先从 CIDFont 字典获取 FontDescriptor，回退到 Type0 字典
+	var fontData []byte
+	if cidDict != nil {
+		fontData = e.readFontFileData(ctx, cidDict)
+	}
+	if len(fontData) == 0 {
+		fontData = e.readFontFileData(ctx, type0Dict)
+	}
+	if len(fontData) == 0 {
+		return nil
+	}
+
+	gidToUnicode := font.ParseTTFcmap(fontData)
+	if len(gidToUnicode) == 0 {
+		return nil
+	}
+
+	// Identity-H 编码下 CID = GID，使用 2 字节编码
+	return font.BuildCMapFromGIDMapping(gidToUnicode, 2)
+}
+
+// readFontFileData 从字体字典的 FontDescriptor 中读取嵌入的字体程序数据。
+// 按优先级尝试 FontFile2（TrueType）→ FontFile3（CFF/OpenType）→ FontFile（Type 1）。
+func (e *Extractor) readFontFileData(ctx *pdfcpuModel.Context, fontDict types.Dict) []byte {
+	descRef := fontDict.IndirectRefEntry("FontDescriptor")
+	if descRef == nil {
+		return nil
+	}
+	descDict, err := ctx.DereferenceDict(*descRef)
+	if err != nil || descDict == nil {
+		return nil
+	}
+
+	// 按优先级尝试不同的字体文件类型
+	for _, key := range []string{"FontFile2", "FontFile3", "FontFile"} {
+		ref := descDict.IndirectRefEntry(key)
+		if ref == nil {
+			continue
+		}
+		sd, _, err := ctx.DereferenceStreamDict(*ref)
+		if err != nil || sd == nil {
+			continue
+		}
+		if err := sd.Decode(); err != nil {
+			continue
+		}
+		if len(sd.Content) > 0 {
+			return sd.Content
+		}
+	}
+	return nil
+}
+
+// isSupportedEncoding 检查编码名称是否有对应的预定义解码器
+func isSupportedEncoding(enc string) bool {
+	switch enc {
+	case "GBKp-EUC-H", "GBKp-EUC-V", "GBK-EUC-H", "GBK-EUC-V",
+		"GBKp-EUC", "GBK-EUC", "UniGB-UTF16-H", "UniGB-UTF16-V",
+		"UniGB-UCS2-H", "UniGB-UCS2-V", "GBpc-EUC-H", "GBpc-EUC-V":
+		return true
+	default:
+		return false
+	}
+}
+
+// toIntValue 从 PDF 值中提取整数值
+func toIntValue(v any) (int, bool) {
+	switch n := v.(type) {
+	case types.Integer:
+		return n.Value(), true
+	case types.Float:
+		return int(n.Value()), true
+	default:
+		return 0, false
+	}
+}
+
+// toFloatValue 从 PDF 值中提取浮点数值
+func toFloatValue(v any) float64 {
+	switch n := v.(type) {
+	case types.Integer:
+		return float64(n.Value())
+	case types.Float:
+		return n.Value()
+	default:
+		return 0
+	}
+}
+
+// toNameValue 从 PDF 值中提取名称字符串
+func toNameValue(v any) (string, bool) {
+	switch n := v.(type) {
+	case types.Name:
+		return string(n), true
+	case string:
+		return n, true
+	default:
+		return "", false
+	}
+}
+
+// macRomanEncoding 是 Mac Roman 编码表 (Apple Standard Roman)
+var macRomanEncoding = [256]rune{
+	0x0000, 0x0001, 0x0002, 0x0003, 0x0004, 0x0005, 0x0006, 0x0007,
+	0x0008, 0x0009, 0x000A, 0x000B, 0x000C, 0x000D, 0x000E, 0x000F,
+	0x0010, 0x0011, 0x0012, 0x0013, 0x0014, 0x0015, 0x0016, 0x0017,
+	0x0018, 0x0019, 0x001A, 0x001B, 0x001C, 0x001D, 0x001E, 0x001F,
+	0x0020, 0x0021, 0x0022, 0x0023, 0x0024, 0x0025, 0x0026, 0x0027,
+	0x0028, 0x0029, 0x002A, 0x002B, 0x002C, 0x002D, 0x002E, 0x002F,
+	0x0030, 0x0031, 0x0032, 0x0033, 0x0034, 0x0035, 0x0036, 0x0037,
+	0x0038, 0x0039, 0x003A, 0x003B, 0x003C, 0x003D, 0x003E, 0x003F,
+	0x0040, 0x0041, 0x0042, 0x0043, 0x0044, 0x0045, 0x0046, 0x0047,
+	0x0048, 0x0049, 0x004A, 0x004B, 0x004C, 0x004D, 0x004E, 0x004F,
+	0x0050, 0x0051, 0x0052, 0x0053, 0x0054, 0x0055, 0x0056, 0x0057,
+	0x0058, 0x0059, 0x005A, 0x005B, 0x005C, 0x005D, 0x005E, 0x005F,
+	0x0060, 0x0061, 0x0062, 0x0063, 0x0064, 0x0065, 0x0066, 0x0067,
+	0x0068, 0x0069, 0x006A, 0x006B, 0x006C, 0x006D, 0x006E, 0x006F,
+	0x0070, 0x0071, 0x0072, 0x0073, 0x0074, 0x0075, 0x0076, 0x0077,
+	0x0078, 0x0079, 0x007A, 0x007B, 0x007C, 0x007D, 0x007E, 0x007F,
+	0x00C4, 0x00C5, 0x00C7, 0x00C9, 0x00D1, 0x00D6, 0x00DC, 0x00E1,
+	0x00E0, 0x00E2, 0x00E4, 0x00E3, 0x00E5, 0x00E7, 0x00E9, 0x00E8,
+	0x00EA, 0x00EB, 0x00ED, 0x00EC, 0x00EE, 0x00EF, 0x00F1, 0x00F3,
+	0x00F2, 0x00F4, 0x00F6, 0x00F5, 0x00FA, 0x00F9, 0x00FB, 0x00FC,
+	0x2020, 0x00B0, 0x00A2, 0x00A3, 0x00A7, 0x2022, 0x00B6, 0x00DF,
+	0x00AE, 0x00A9, 0x2122, 0x00B4, 0x00A8, 0x2260, 0x00C6, 0x00D8,
+	0x221E, 0x00B1, 0x2264, 0x2265, 0x00A5, 0x00B5, 0x2202, 0x2211,
+	0x220F, 0x03C0, 0x222B, 0x00AA, 0x00BA, 0x03A9, 0x00E6, 0x00F8,
+	0x00BF, 0x00A1, 0x00AC, 0x221A, 0x0192, 0x2248, 0x2206, 0x00AB,
+	0x00BB, 0x2026, 0x00A0, 0x00C0, 0x00C3, 0x00D5, 0x0152, 0x0153,
+	0x2013, 0x2014, 0x201C, 0x201D, 0x2018, 0x2019, 0x00F7, 0x25CA,
+	0x00FF, 0x0178, 0x2044, 0x20AC, 0x2039, 0x203A, 0xFB01, 0xFB02,
+	0x2021, 0x00B7, 0x201A, 0x201E, 0x2030, 0x00C2, 0x00CA, 0x00C1,
+	0x00CB, 0x00C8, 0x00CD, 0x00CE, 0x00CF, 0x00CC, 0x00D3, 0x00D4,
+	0xF8FF, 0x00D2, 0x00DA, 0x00DB, 0x00D9, 0x0131, 0x02C6, 0x02DC,
+	0x00AF, 0x02D8, 0x02D9, 0x02DA, 0x00B8, 0x02DD, 0x02DB, 0x02C7,
+}
+
+// standardEncoding 是 PDF Standard Encoding 表
+var standardEncoding = [256]rune{
+	0x0000, 0x0001, 0x0002, 0x0003, 0x0004, 0x0005, 0x0006, 0x0007,
+	0x0008, 0x0009, 0x000A, 0x000B, 0x000C, 0x000D, 0x000E, 0x000F,
+	0x0010, 0x0011, 0x0012, 0x0013, 0x0014, 0x0015, 0x0016, 0x0017,
+	0x0018, 0x0019, 0x001A, 0x001B, 0x001C, 0x001D, 0x001E, 0x001F,
+	0x0020, 0x0021, 0x0022, 0x0023, 0x0024, 0x0025, 0x0026, 0x0027,
+	0x0028, 0x0029, 0x002A, 0x002B, 0x002C, 0x002D, 0x002E, 0x002F,
+	0x0030, 0x0031, 0x0032, 0x0033, 0x0034, 0x0035, 0x0036, 0x0037,
+	0x0038, 0x0039, 0x003A, 0x003B, 0x003C, 0x003D, 0x003E, 0x003F,
+	0x0040, 0x0041, 0x0042, 0x0043, 0x0044, 0x0045, 0x0046, 0x0047,
+	0x0048, 0x0049, 0x004A, 0x004B, 0x004C, 0x004D, 0x004E, 0x004F,
+	0x0050, 0x0051, 0x0052, 0x0053, 0x0054, 0x0055, 0x0056, 0x0057,
+	0x0058, 0x0059, 0x005A, 0x005B, 0x005C, 0x005D, 0x005E, 0x005F,
+	0x0060, 0x0061, 0x0062, 0x0063, 0x0064, 0x0065, 0x0066, 0x0067,
+	0x0068, 0x0069, 0x006A, 0x006B, 0x006C, 0x006D, 0x006E, 0x006F,
+	0x0070, 0x0071, 0x0072, 0x0073, 0x0074, 0x0075, 0x0076, 0x0077,
+	0x0078, 0x0079, 0x007A, 0x007B, 0x007C, 0x007D, 0x007E, 0x0000,
+	0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+	0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+	0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+	0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+	0x0000, 0x00A1, 0x00A2, 0x0000, 0x00A4, 0x0000, 0x00A6, 0x00A7,
+	0x00A8, 0x0000, 0x0000, 0x0000, 0x0000, 0x00AD, 0x0000, 0x0000,
+	0x00B0, 0x00B1, 0x0000, 0x0000, 0x00B4, 0x0000, 0x00B6, 0x00B7,
+	0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+	0x00C0, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x00C7,
+	0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+	0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+	0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x00DB, 0x0000, 0x0000,
+	0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+	0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+	0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+	0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
 }
 
 // buildTextBoxes 使用布局分析器将字符分组为文本框。
@@ -394,7 +816,96 @@ func (e *Extractor) buildTextBoxes(chars []model.Char) []model.TextBox {
 	return layout.Analyze(chars, layout.DefaultParams())
 }
 
-// deduplicateLayerChars 去重双层 PDF 渲染产生的重复和交错字符。
+// normalizeRotation 对解释器输出的所有元素做坐标反旋转变换，
+// 将旋转页面的坐标系归一化为标准方向（Rotate=0），
+// 使得后续的布局分析和表格检测无需关心旋转。
+//
+// 变换公式（将 PDF 坐标转为视觉坐标，即读者看到的坐标）：
+//
+//	Rotate=90:  visual_x = pdf_y,              visual_y = pageWidth  - pdf_x
+//	Rotate=180: visual_x = pageWidth - pdf_x,  visual_y = pageHeight - pdf_y
+//	Rotate=270: visual_x = pageHeight - pdf_y, visual_y = pdf_x
+//
+// 90°/270° 旋转后，页面的视觉宽高互换（调用方负责交换 width/height）。
+func normalizeRotation(result *model.InterpretResult, rotate int, pw, ph float64) {
+	// 归一化到 [0, 360)
+	rotate = ((rotate % 360) + 360) % 360
+	if rotate == 0 {
+		return
+	}
+
+	// 变换所有字符的坐标
+	for i := range result.Chars {
+		ch := &result.Chars[i]
+		ch.Origin = rotatePoint(ch.Origin, rotate, pw, ph)
+		ch.BBox = rotateRect(ch.BBox, rotate, pw, ph)
+		// 重新计算前进宽度：旋转后字符的视觉水平宽度
+		ch.Advance = ch.BBox.X1 - ch.BBox.X0
+	}
+
+	// 变换所有矩形（用于表格检测）
+	for i := range result.Rects {
+		result.Rects[i] = rotateRect(result.Rects[i], rotate, pw, ph)
+	}
+
+	// 变换所有线段（用于表格检测）
+	for i := range result.Lines {
+		p0 := rotatePoint(model.Point{X: result.Lines[i].X0, Y: result.Lines[i].Y0}, rotate, pw, ph)
+		p1 := rotatePoint(model.Point{X: result.Lines[i].X1, Y: result.Lines[i].Y1}, rotate, pw, ph)
+		result.Lines[i] = model.LineSegment{X0: p0.X, Y0: p0.Y, X1: p1.X, Y1: p1.Y}
+	}
+
+	// 变换所有图片绘制位置
+	for i := range result.ImagePlacements {
+		result.ImagePlacements[i].BBox = rotateRect(result.ImagePlacements[i].BBox, rotate, pw, ph)
+	}
+}
+
+// rotatePoint 将一个点从 PDF 页面坐标系变换为视觉坐标系。
+func rotatePoint(p model.Point, rotate int, pw, ph float64) model.Point {
+	switch rotate {
+	case 90:
+		return model.Point{X: p.Y, Y: pw - p.X}
+	case 180:
+		return model.Point{X: pw - p.X, Y: ph - p.Y}
+	case 270:
+		return model.Point{X: ph - p.Y, Y: p.X}
+	default:
+		return p
+	}
+}
+
+// rotateRect 将一个轴对齐矩形从 PDF 页面坐标系变换为视觉坐标系。
+// 由于旋转变换保持轴对齐，只需利用坐标单调性直接变换边界值。
+func rotateRect(r model.Rect, rotate int, pw, ph float64) model.Rect {
+	switch rotate {
+	case 90:
+		// new_x = old_y (单调增), new_y = pw - old_x (单调减)
+		return model.Rect{
+			X0: r.Y0,
+			Y0: pw - r.X1,
+			X1: r.Y1,
+			Y1: pw - r.X0,
+		}
+	case 180:
+		return model.Rect{
+			X0: pw - r.X1,
+			Y0: ph - r.Y1,
+			X1: pw - r.X0,
+			Y1: ph - r.Y0,
+		}
+	case 270:
+		// new_x = ph - old_y (单调减), new_y = old_x (单调增)
+		return model.Rect{
+			X0: ph - r.Y1,
+			Y0: r.X0,
+			X1: ph - r.Y0,
+			Y1: r.X1,
+		}
+	default:
+		return r
+	}
+}
 //
 // 某些 PDF 模板使用双层渲染：同一行文字由多个 BT/ET 块在不同位置绘制，
 // 后绘制的字符会覆盖先绘制的字符（浏览器/阅读器按此规则显示）。

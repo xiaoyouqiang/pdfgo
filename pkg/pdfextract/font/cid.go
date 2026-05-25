@@ -11,24 +11,30 @@ import (
 // CID 字体使用多字节编码（通常 2 字节），通过 ToUnicode CMap 将编码映射为 Unicode。
 // 这类字体主要用于中文、日文、韩文等需要大量字符集的语言。
 type CIDFontDecoder struct {
-	name         string  // 字体名称
-	toUnicode    *CMap   // ToUnicode CMap 映射表
-	defaultWidth float64 // 默认字符宽度（当宽度表不可用时使用）
-	encoding     string  // 预定义编码名称（如 "GBKp-EUC-H"），用于无 ToUnicode 时的回退解码
+	name         string           // 字体名称
+	toUnicode    *CMap            // ToUnicode CMap 映射表
+	defaultWidth float64          // 默认字符宽度（当宽度表不可用时使用）
+	widths       map[int]float64  // per-CID 宽度映射（从 W 数组解析），key 是 CID 值
+	encoding     string           // 预定义编码名称（如 "GBKp-EUC-H"），用于无 ToUnicode 时的回退解码
 }
 
 // NewCIDFontDecoder 创建一个 CID 字体解码器。
 //   - name: 字体名称
 //   - toUnicode: ToUnicode CMap（可为 nil，此时使用 encoding 回退）
 //   - defaultWidth: 默认字符宽度（单位为千分之一，通常从 CIDFont 字典的 DW 条目获取）
-func NewCIDFontDecoder(name string, toUnicode *CMap, defaultWidth float64) *CIDFontDecoder {
+//   - widths: per-CID 宽度映射（可为 nil，此时全部使用 defaultWidth）
+func NewCIDFontDecoder(name string, toUnicode *CMap, defaultWidth float64, widths map[int]float64) *CIDFontDecoder {
 	if defaultWidth == 0 {
 		defaultWidth = 1.0
+	}
+	if widths == nil {
+		widths = make(map[int]float64)
 	}
 	return &CIDFontDecoder{
 		name:         name,
 		toUnicode:    toUnicode,
 		defaultWidth: defaultWidth,
+		widths:       widths,
 	}
 }
 
@@ -42,6 +48,7 @@ func NewCIDFontDecoderWithEncoding(name string, encoding string, defaultWidth fl
 		name:         name,
 		defaultWidth: defaultWidth,
 		encoding:     encoding,
+		widths:       make(map[int]float64),
 	}
 }
 
@@ -83,7 +90,13 @@ func (d *CIDFontDecoder) decodeWithCMap(data []byte) ([]rune, []float64) {
 			r = '?'
 		}
 		runes = append(runes, r)
-		widths = append(widths, d.defaultWidth)
+
+		// 优先从 per-CID 宽度表查找，否则使用默认宽度
+		if w, ok := d.widths[code]; ok {
+			widths = append(widths, w)
+		} else {
+			widths = append(widths, d.defaultWidth)
+		}
 	}
 	return runes, widths
 }
@@ -105,14 +118,41 @@ func (d *CIDFontDecoder) decodeWithPredefinedEncoding(data []byte) ([]rune, []fl
 	// 将 UTF-8 字节转换为 rune 列表
 	var runes []rune
 	var widths []float64
-	for len(decoded) > 0 {
+	byteIdx := 0
+	for byteIdx < len(data) {
+		// 估算原始编码消耗的字节数（用于查找宽度）
 		r, sz := utf8.DecodeRune(decoded)
 		if r == utf8.RuneError {
 			r = '?'
 		}
 		runes = append(runes, r)
-		widths = append(widths, d.defaultWidth)
-		decoded = decoded[sz:]
+
+		// 对于多字节编码，使用字节偏移作为 CID 近似值查找宽度
+		cid := 0
+		if len(data)-byteIdx >= 2 {
+			cid = int(data[byteIdx])<<8 | int(data[byteIdx+1])
+		} else if len(data)-byteIdx >= 1 {
+			cid = int(data[byteIdx])
+		}
+
+		if w, ok := d.widths[cid]; ok {
+			widths = append(widths, w)
+		} else {
+			widths = append(widths, d.defaultWidth)
+		}
+
+		// 推进 UTF-8 解码位置
+		if sz > 0 {
+			decoded = decoded[sz:]
+		} else {
+			decoded = decoded[1:]
+		}
+		// 推进原始字节位置（GBK 等 2 字节编码）
+		if len(data)-byteIdx >= 2 && data[byteIdx] >= 0x80 {
+			byteIdx += 2
+		} else {
+			byteIdx++
+		}
 	}
 	return runes, widths
 }

@@ -28,6 +28,7 @@ venv/
 
 # Debug / temp files
 d.txt
+*.txt
 debug_*.txt
 debug_*.md
 full_markdown.md
