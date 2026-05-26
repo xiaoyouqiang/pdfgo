@@ -303,10 +303,10 @@ func BuildCMapFromGIDMapping(gidToUnicode map[int]rune, codeBytes int) *CMap {
 	if len(gidToUnicode) == 0 {
 		return nil
 	}
-	singleMappings := make(map[int]rune, len(gidToUnicode))
+	singleMappings := make(map[int][]rune, len(gidToUnicode))
 	for gid, r := range gidToUnicode {
 		if r > 0 {
-			singleMappings[gid] = r
+			singleMappings[gid] = []rune{r}
 		}
 	}
 	if len(singleMappings) == 0 {

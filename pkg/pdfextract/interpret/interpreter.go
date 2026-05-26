@@ -462,14 +462,44 @@ func (ci *ContentInterpreter) showString(data []byte) {
 }
 
 // showStrings 处理 TJ 操作符，支持混合文本和字距调整。
+// TJ 数组中的负值表示正向位移（模拟空格），正值表示回退（微调字距）。
+// 当负向位移足够大时（超过有效字号 10%），视为词间空格并插入空格字符。
 func (ci *ContentInterpreter) showStrings(operands []Operand) {
 	for _, op := range operands {
 		if arr, ok := op.Value.([]any); ok {
 			for _, elem := range arr {
 				switch v := elem.(type) {
 				case float64:
+					// 记录位移前的页面坐标
+					oldX, oldY := ci.gState.Transform(ci.tState.Tm[4], ci.tState.Tm[5])
+
+					// 应用位移到文本矩阵
 					ci.tState.Tm[4] += ci.tState.Tm[0] * (-v / 1000.0)
 					ci.tState.Tm[5] += ci.tState.Tm[1] * (-v / 1000.0)
+
+					// 负值 = 正向移动 = 可能是词间空格
+					if v < 0 {
+						newX, _ := ci.gState.Transform(ci.tState.Tm[4], ci.tState.Tm[5])
+						pageGap := math.Abs(newX - oldX)
+
+						// 计算页面空间中的有效字号作为阈值参考
+						tm := ci.tState.Tm
+						ctm := ci.gState.CTM
+						effFontSize := math.Abs(ctm[0]*tm[0] + ctm[2]*tm[1])
+
+						// 词间空格通常为 em 的 15-50%，kerning 通常为 0-8%
+						// 阈值 10% 可有效区分两者
+						if effFontSize > 0 && pageGap > effFontSize*0.1 {
+							ci.charSeqNo++
+							ci.result.Chars = append(ci.result.Chars, model.Char{
+								Text:    " ",
+								Origin:  model.Point{X: oldX, Y: oldY},
+								Advance: pageGap,
+								Font:    ci.buildFontInfo(),
+								SeqNo:   ci.charSeqNo,
+							})
+						}
+					}
 				case []byte:
 					ci.showString(v)
 				}

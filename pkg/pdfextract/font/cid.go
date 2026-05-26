@@ -69,7 +69,7 @@ func (d *CIDFontDecoder) Decode(data []byte) ([]rune, []float64) {
 	return nil, nil
 }
 
-// decodeWithCMap 使用 ToUnicode CMap 解码
+// decodeWithCMap 使用 ToUnicode CMap 解码（支持一对多映射）
 func (d *CIDFontDecoder) decodeWithCMap(data []byte) ([]rune, []float64) {
 	codeBytes := d.toUnicode.CodeBytes()
 	if codeBytes < 1 {
@@ -85,18 +85,23 @@ func (d *CIDFontDecoder) decodeWithCMap(data []byte) ([]rune, []float64) {
 		}
 		i += codeBytes
 
-		r := d.toUnicode.DecodeSingle(code)
-		if r == 0 {
-			r = '?'
+		decoded := d.toUnicode.Decode(code)
+		if len(decoded) == 0 {
+			decoded = []rune{'?'}
 		}
-		runes = append(runes, r)
 
-		// 优先从 per-CID 宽度表查找，否则使用默认宽度
-		if w, ok := d.widths[code]; ok {
-			widths = append(widths, w)
-		} else {
-			widths = append(widths, d.defaultWidth)
+		// 查找宽度
+		w := d.defaultWidth
+		if dw, ok := d.widths[code]; ok {
+			w = dw
 		}
+
+		// 宽度按字符数均分
+		perRune := w / float64(len(decoded))
+		for range decoded {
+			widths = append(widths, perRune)
+		}
+		runes = append(runes, decoded...)
 	}
 	return runes, widths
 }

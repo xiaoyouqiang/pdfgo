@@ -9,7 +9,7 @@ import (
 
 // CMap 实现 PDF ToUnicode CMap 的解析和解码。
 type CMap struct {
-	singleMappings map[int]rune
+	singleMappings map[int][]rune // 支持 1 对多映射（连字符如 "fi" → []rune{'f','i'}）
 	rangeMappings  []RangeMapping
 	codeLength     int
 }
@@ -30,7 +30,7 @@ var (
 
 func ParseCMap(data []byte) (*CMap, error) {
 	cmap := &CMap{
-		singleMappings: make(map[int]rune),
+		singleMappings: make(map[int][]rune),
 		codeLength:     1,
 	}
 	data = stripComments(data)
@@ -75,11 +75,13 @@ func parsebfchar(data []byte, cmap *CMap) error {
 		pairs := hexPairRx.FindAllSubmatch(segment, -1)
 		for i := 0; i+1 < len(pairs); i += 2 {
 			src := parseHex(string(pairs[i][1]))
-			dst := parseHex(string(pairs[i+1][1]))
-			if src < 0 || dst < 0 {
+			if src < 0 {
 				continue
 			}
-			cmap.singleMappings[src] = rune(dst)
+			runes := parseHexToRunes(string(pairs[i+1][1]))
+			if len(runes) > 0 {
+				cmap.singleMappings[src] = runes
+			}
 			hexLen := len(string(pairs[i][1]))
 			if hexLen > cmap.codeLength {
 				cmap.codeLength = hexLen
@@ -89,6 +91,7 @@ func parsebfchar(data []byte, cmap *CMap) error {
 	}
 	return nil
 }
+
 
 func parsebfrange(data []byte, cmap *CMap) error {
 	offset := 0
@@ -121,9 +124,9 @@ func parsebfrange(data []byte, cmap *CMap) error {
 			// 2) 数组格式：<start> <end> [<u1> <u2> ...] — 逐个映射
 			if len(pairs) > 3 && bytes.Contains(line, []byte{'['}) {
 				for i := 0; i+2 < len(pairs) && startCode+i <= endCode; i++ {
-					uni := parseHex(string(pairs[i+2][1]))
-					if uni >= 0 {
-						cmap.singleMappings[startCode+i] = rune(uni)
+					runes := parseHexToRunes(string(pairs[i+2][1]))
+					if len(runes) > 0 {
+						cmap.singleMappings[startCode+i] = runes
 						hexLen := len(string(pairs[i+2][1]))
 						if hexLen > cmap.codeLength {
 							cmap.codeLength = hexLen
@@ -150,7 +153,6 @@ func parsebfrange(data []byte, cmap *CMap) error {
 	}
 	return nil
 }
-
 func parseCodespace(data []byte, cmap *CMap) {
 	rx := regexp.MustCompile(`begincodespacerange\s*((?:\s*<[0-9A-Fa-f]+>\s*<[0-9A-Fa-f]+>\s*)+)\s*endcodespacerange`)
 	m := rx.FindSubmatch(data)
@@ -178,26 +180,35 @@ func (c *CMap) CodeBytes() int {
 }
 
 func (c *CMap) DecodeSingle(code int) rune {
-	if r, ok := c.singleMappings[code]; ok {
-		return r
+	runes := c.Decode(code)
+	if len(runes) > 0 {
+		return runes[0]
+	}
+	return 0
+}
+
+// Decode 将编码值解码为 Unicode 字符切片，支持一对多映射（如连字符 "fi"）。
+func (c *CMap) Decode(code int) []rune {
+	if runes, ok := c.singleMappings[code]; ok {
+		return runes
 	}
 	for _, rm := range c.rangeMappings {
 		if code >= rm.Start && code <= rm.End {
-				decoded := rm.Base + code - rm.Start
-				if decoded < 0 || decoded > 0x10FFFF {
-					return 0
-				}
-				return rune(decoded)
+			decoded := rm.Base + code - rm.Start
+			if decoded < 0 || decoded > 0x10FFFF {
+				return nil
+			}
+			return []rune{rune(decoded)}
 		}
 	}
-	return 0
+	return nil
 }
 
 func (c *CMap) MappingCount() (singles, ranges int) {
 	return len(c.singleMappings), len(c.rangeMappings)
 }
 
-func (c *CMap) AllSingles() map[int]rune {
+func (c *CMap) AllSingles() map[int][]rune {
 	return c.singleMappings
 }
 
@@ -215,6 +226,25 @@ func parseHex(s string) int {
 		return -1
 	}
 	return int(v)
+}
+
+// parseHexToRunes 将 CMap 中的十六进制值解析为 rune 切片。
+// ToUnicode CMap 中一个编码可映射到多个 Unicode 码点（如连字符 "fi" = 00660069），
+// 每 4 个十六进制位代表一个 BMP 字符。
+func parseHexToRunes(hex string) []rune {
+	hex = trimHex(hex)
+	if len(hex) == 0 {
+		return nil
+	}
+	var runes []rune
+	for i := 0; i+4 <= len(hex); i += 4 {
+		v, err := strconv.ParseUint(hex[i:i+4], 16, 16)
+		if err != nil {
+			continue
+		}
+		runes = append(runes, rune(v))
+	}
+	return runes
 }
 
 func trimHex(s string) string {

@@ -33,40 +33,48 @@ func NewSimpleFontDecoder(name string, toUnicode *CMap, encoding map[byte]rune, 
 
 // Decode 将字节切片解码为 Unicode 字符和对应的宽度值。
 // 解码优先级：ToUnicode CMap → 自定义编码 → WinAnsiEncoding。
+// 支持 CMap 中的一对多映射（如连字符 "fi" 展开为 'f' 和 'i'），
+// 宽度按字符数均分以保证总位移不变。
 func (d *SimpleFontDecoder) Decode(data []byte) ([]rune, []float64) {
-	runes := make([]rune, 0, len(data))
-	widths := make([]float64, 0, len(data))
+	var runes []rune
+	var widths []float64
 	for _, b := range data {
-		var r rune
+		var decoded []rune
 		// 按优先级尝试解码
 		if d.toUnicode != nil {
-			// 最高优先级：使用 ToUnicode CMap
-			r = d.toUnicode.DecodeSingle(int(b))
-			if r == 0 {
-				r = '?' // 无法映射的字符用问号替代
+			// 最高优先级：使用 ToUnicode CMap（支持一对多映射）
+			decoded = d.toUnicode.Decode(int(b))
+			if len(decoded) == 0 {
+				decoded = []rune{'?'}
 			}
 		} else if d.encoding != nil {
 			// 次优先级：使用自定义编码表
 			if mapped, ok := d.encoding[b]; ok {
-				r = mapped
+				decoded = []rune{mapped}
 			} else {
-				r = rune(b)
+				decoded = []rune{rune(b)}
 			}
 		} else {
 			// 最低优先级：使用 WinAnsiEncoding（CP1252）
-			r = WinAnsiEncoding[b]
+			r := WinAnsiEncoding[b]
 			if r == 0 {
 				r = rune(b)
 			}
+			decoded = []rune{r}
 		}
-		runes = append(runes, r)
 
 		// 查找字符宽度，未定义时使用默认值 0.5
-		if w, ok := d.widths[b]; ok {
-			widths = append(widths, w)
-		} else {
-			widths = append(widths, 0.5)
+		w := 0.5
+		if dw, ok := d.widths[b]; ok {
+			w = dw
 		}
+
+		// 宽度按解码字符数均分（连字符展开后每个字符各占一部分）
+		perRune := w / float64(len(decoded))
+		for range decoded {
+			widths = append(widths, perRune)
+		}
+		runes = append(runes, decoded...)
 	}
 	return runes, widths
 }

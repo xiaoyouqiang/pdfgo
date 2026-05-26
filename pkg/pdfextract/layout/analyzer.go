@@ -89,6 +89,7 @@ func estimateFontSize(chars []model.Char) float64 {
 //  1. 按 Y 降序（页面顶部优先）、X 升序排序字符
 //  2. 使用紧 Y 阈值（3 单位）判断字符是否属于同一行
 //  3. 使用 X 间隔阈值检测分栏（多列布局）
+//  4. 检测上标行：如果某行字号明显更小、Y 位置明显更高、且 X 与前一行重叠，则合并到前一行
 func groupCharsToLines(chars []model.Char, params Params) []model.TextLine {
 	if len(chars) == 0 {
 		return nil
@@ -138,13 +139,13 @@ func groupCharsToLines(chars []model.Char, params Params) []model.TextLine {
 			continue
 		}
 
-			// 用当前行所有字符的 Y 中位数作为基准，避免首个字符异常导致误判
-			ySum := 0.0
-			for _, c := range currentLine {
-				ySum += c.Origin.Y
-			}
-			refY := ySum / float64(len(currentLine))
-			yGap := math.Abs(ch.Origin.Y - refY)
+		// 用当前行所有字符的 Y 中位数作为基准，避免首个字符异常导致误判
+		ySum := 0.0
+		for _, c := range currentLine {
+			ySum += c.Origin.Y
+		}
+		refY := ySum / float64(len(currentLine))
+		yGap := math.Abs(ch.Origin.Y - refY)
 
 		// Y 差异超过阈值，开始新行
 		if yGap > lineHeightThreshold {
@@ -172,7 +173,140 @@ func groupCharsToLines(chars []model.Char, params Params) []model.TextLine {
 		lines = append(lines, finalizeLine(currentLine, params))
 	}
 
+	// 后处理：合并上标行到主文本行
+	lines = mergeSuperscriptLines(lines)
+
 	return lines
+}
+
+// mergeSuperscriptLines 基于 SeqNo（内容流绘制顺序）逐字符合并上标行。
+//
+// 采用两遍处理：
+//
+//	第一遍：收集所有非上标行到 result（确保所有主文本行就绪）
+//	第二遍：对每个上标字符按 SeqNo 找到前驱字符，插入到其之后
+//
+// 必须两遍处理的原因：PDF 内容流中上标与作者名是交错绘制的：
+//
+//	[(Zhiyong Wu )]TJ    → SeqNo 124-133（第二行作者）
+//	4.338 Td              → 移到上标位置
+//	[(1,2,†)]TJ           → SeqNo 134-138（上标，属于第二行作者）
+//	-4.338 Td             → 返回
+//	[(, Yiwen Guo )]TJ    → SeqNo 139-149
+//	...
+//
+// 上标行（Y=692.35）在 Y 降序中排在第一作者行之后、第二作者行之前。
+// 若单遍处理，第二作者行尚未进入 result，上标会错误地归入第一作者行。
+// 两遍处理确保所有主文本行就绪后再做 SeqNo 匹配。
+func mergeSuperscriptLines(lines []model.TextLine) []model.TextLine {
+	if len(lines) < 2 {
+		return lines
+	}
+
+	// 第一遍：分离上标行和主文本行
+	var result []model.TextLine
+	var superscriptLines []model.TextLine
+	for _, line := range lines {
+		if isSuperscriptBySize(line) {
+			superscriptLines = append(superscriptLines, line)
+		} else {
+			result = append(result, line)
+		}
+	}
+
+	if len(superscriptLines) == 0 {
+		return result
+	}
+
+	// 第二遍：按 SeqNo 逐字符合并上标到主文本行
+	for _, supLine := range superscriptLines {
+		supChars := make([]model.Char, len(supLine.Chars))
+		copy(supChars, supLine.Chars)
+		sort.Slice(supChars, func(a, b int) bool {
+			return supChars[a].SeqNo < supChars[b].SeqNo
+		})
+
+		for _, sc := range supChars {
+			lineIdx, charIdx := findInsertPosition(result, sc.SeqNo)
+			if lineIdx >= 0 && charIdx >= 0 {
+				target := &result[lineIdx]
+				insertAt := charIdx + 1
+				target.Chars = append(
+					target.Chars[:insertAt],
+					append([]model.Char{sc}, target.Chars[insertAt:]...)...,
+				)
+				target.BBox = lineBBox(target.Chars)
+			}
+		}
+	}
+
+	return result
+}
+
+// isSuperscriptBySize 仅通过字号判断是否为上标行。
+// 上标行的字号必须明显小于页面主流字号。
+func isSuperscriptBySize(line model.TextLine) bool {
+	avgSize := avgFontSizeInLine(line.Chars)
+	if avgSize <= 0 {
+		return false
+	}
+	// 页面主流字号通常 >= 8，上标通常 <= 8
+	// 使用固定阈值区分：上标字号 < 8 且行内字符数较少
+	if avgSize >= 8 {
+		return false
+	}
+	// 排除过长的行（不太可能是纯上标）
+	if len(line.Chars) > 30 {
+		return false
+	}
+	return true
+}
+
+// findInsertPosition 在所有已有行中找到 SeqNo 最近的前驱字符位置。
+// 返回 (行索引, 字符索引)，用于在 charIdx+1 处插入上标字符。
+func findInsertPosition(result []model.TextLine, targetSeqNo int) (int, int) {
+	bestLineIdx := -1
+	bestCharIdx := -1
+	bestSeq := -1
+
+	for li, line := range result {
+		for ci, c := range line.Chars {
+			if c.SeqNo < targetSeqNo && c.SeqNo > bestSeq {
+				bestLineIdx = li
+				bestCharIdx = ci
+				bestSeq = c.SeqNo
+			}
+		}
+	}
+
+	return bestLineIdx, bestCharIdx
+}
+
+// mergeBySeqNo 已弃用，由 mergeSuperscriptLines 中的逐字符插入逻辑替代。
+// 保留此函数签名以避免外部引用编译错误。
+func mergeBySeqNo(line *model.TextLine, superscriptChars []model.Char) {
+	if line == nil || len(line.Chars) == 0 || len(superscriptChars) == 0 {
+		return
+	}
+	line.Chars = append(line.Chars, superscriptChars...)
+}
+
+// avgFontSizeInLine 计算一行中所有字符的平均字号。
+func avgFontSizeInLine(chars []model.Char) float64 {
+	if len(chars) == 0 {
+		return 0
+	}
+	var sum, count float64
+	for _, c := range chars {
+		if c.Font.Size > 0 {
+			sum += c.Font.Size
+			count++
+		}
+	}
+	if count > 0 {
+		return sum / count
+	}
+	return 0
 }
 
 // hasSameFontOverlap 检测同一字体中是否有字符在 X 方向上重叠。
@@ -199,6 +333,10 @@ func hasSameFontOverlap(chars []model.Char) bool {
 // finalizeLine 完成一行文本的构建：排序字符，插入词间空格，计算边界框。
 // 当检测到同字体X重叠时（双层渲染PDF），按绘制序号排序以保持内容流顺序；
 // 否则按X坐标排序（普通PDF的正常布局顺序）。
+//
+// 特殊处理：检测上标字符（字号明显小于行内平均字号且位置明显偏高），
+// 如果其水平范围与主文本行重叠，则将其归入主文本行，不单独成行。
+// 这解决了 LaTeX PDF 中作者上标 affiliation 数字与姓名断开的问题。
 func finalizeLine(chars []model.Char, params Params) model.TextLine {
 	if hasSameFontOverlap(chars) {
 		sort.Slice(chars, func(i, j int) bool {
@@ -221,6 +359,19 @@ func finalizeLine(chars []model.Char, params Params) model.TextLine {
 	}
 	if count > 0 {
 		avgAdvance /= float64(count)
+	}
+
+	// 估算行内平均字号（用于检测上标）
+	avgFontSize := 0.0
+	fontCount := 0
+	for _, c := range chars {
+		if c.Font.Size > 0 {
+			avgFontSize += c.Font.Size
+			fontCount++
+		}
+	}
+	if fontCount > 0 {
+		avgFontSize /= float64(fontCount)
 	}
 
 	// 在字符间隙过大处插入空格
@@ -248,6 +399,24 @@ func finalizeLine(chars []model.Char, params Params) model.TextLine {
 	}
 
 	return model.TextLine{Chars: result, BBox: bbox}
+}
+
+// mergeSuperscriptCharsIntoLine 将上标行的所有字符合并到主文本行末尾，
+// 在主文本最后一个非空格字符和上标之间插入一个空格。
+func mergeSuperscriptCharsIntoLine(line *model.TextLine, superscriptChars []model.Char) {
+	if line == nil || len(line.Chars) == 0 || len(superscriptChars) == 0 {
+		return
+	}
+	// 取主文本最后一个字符作为空格的参考位置
+	lastChar := line.Chars[len(line.Chars)-1]
+	// 在上标前插入空格
+	line.Chars = append(line.Chars, model.Char{
+		Text:    " ",
+		Origin:  model.Point{X: lastChar.Origin.X + lastChar.Advance, Y: lastChar.Origin.Y},
+		Advance: superscriptChars[0].Origin.X - (lastChar.Origin.X + lastChar.Advance),
+		Font:    lastChar.Font,
+	})
+	line.Chars = append(line.Chars, superscriptChars...)
 }
 
 // lineBBox 计算一行字符的整体边界框。
