@@ -12,8 +12,9 @@ import (
 
 // tocEntry 表示从 PDF 目录行中提取的一个条目。
 type tocEntry struct {
-	title string // 目录条目标题，如 "1 目的 Purpose"
-	level int    // 标题层级：1=H2, 2=H3, 3=H4
+	title    string  // 目录条目标题，如 "1 目的 Purpose"
+	level    int     // 标题层级：1=H2, 2=H3, 3=H4
+	originX  float64 // 第一个字符的 Origin.X，用于基于缩进计算层级
 }
 
 // tocLineRe 匹配 PDF 风格的目录行，提取标题部分。
@@ -508,9 +509,18 @@ func bboxKey(r model.Rect) [4]int {
 }
 
 // extractTocEntries scans all pages for TOC lines and extracts entry titles and levels.
+// Level is determined by:
+//   1. If title has a heading number pattern (e.g., "1.1"), use dot count
+//   2. Otherwise, use the indent (Origin.X) hierarchy: entries with same Origin.X are same level,
+//      entries with larger Origin.X are child of the preceding entry with smaller Origin.X
 func extractTocEntries(pages []model.Page) []tocEntry {
 	var entries []tocEntry
 	seen := make(map[[2]interface{}]bool)
+
+	// Track base X positions for indent-based level calculation
+	var baseX float64 = -1 // Base indent level (smallest X seen so far)
+	var lastX float64 = -1  // Previous entry's X position
+	var lastLevel int = 0   // Level of previous entry
 
 	for pgNum, page := range pages {
 		for _, tb := range page.TextBoxes {
@@ -530,11 +540,38 @@ func extractTocEntries(pages []model.Page) []tocEntry {
 				seen[[2]interface{}{title, pgNum}] = true
 
 				level := 1
+				originX := float64(0)
+				if len(line.Chars) > 0 {
+					originX = line.Chars[0].Origin.X
+				}
+
 				if nm := headingNumRe.FindStringSubmatch(title); nm != nil {
+					// Strategy 1: Use heading number pattern
 					dots := strings.Count(nm[1], ".")
 					level = dots + 1
+				} else {
+					// Strategy 2: Use indent (Origin.X) for level inference
+
+					if baseX < 0 {
+						// First entry, set base
+						baseX = originX
+						lastX = originX
+						level = 1
+					} else if originX == lastX {
+						// Same indent as previous entry
+						level = lastLevel
+					} else if originX > lastX {
+						// More indented than previous, should be child
+						level = lastLevel + 1
+					} else {
+						// Less indented, find the level based on current base
+						level = 1
+					}
+					lastX = originX
+					lastLevel = level
 				}
-				entries = append(entries, tocEntry{title: title, level: level})
+
+				entries = append(entries, tocEntry{title: title, level: level, originX: originX})
 			}
 		}
 	}
