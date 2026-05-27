@@ -119,6 +119,13 @@ type ContentItem struct {
 	Image *ImageInfo  // 当 Type == "image" 时的图片指针
 }
 
+// readingEntry 是 ReadingOrder 排序用的内部结构。
+type readingEntry struct {
+	item ContentItem
+	y    float64
+	x    float64
+}
+
 // ExtractionResult 表示整个 PDF 文档的提取结果。
 type ExtractionResult struct {
 	Title string // 文档标题（从第一页居中文本中识别）
@@ -136,14 +143,16 @@ type Page struct {
 }
 
 // ReadingOrder 将页面上的所有文本框、表格和图片按视觉阅读顺序排列。
-// 排序规则：从上到下（PDF 坐标系中 Y 值大的在上方），同高度则从左到右。
+//
+// 多栏布局处理：
+//  1. 通过 X0 坐标的分布检测栏边界（寻找 X0 间隔超过页宽 10% 的位置）
+//  2. 将内容项分配到对应的栏
+//  3. 每栏内按 Y 降序（从上到下）排序
+//  4. 按栏从左到右输出
+//
+// 单栏布局时退化为简单的 Y 降序排序。
 func (p *Page) ReadingOrder() []ContentItem {
-	type entry struct {
-		item ContentItem
-		y    float64
-		x    float64
-	}
-	var entries []entry
+	var entries []readingEntry
 
 	// 将所有文本框添加到排序列表
 	for i := range p.TextBoxes {
@@ -162,7 +171,7 @@ func (p *Page) ReadingOrder() []ContentItem {
 		if len(tb.Lines) > 0 && len(tb.Lines[0].Chars) > 0 {
 			x = tb.Lines[0].Chars[0].BBox.X0
 		}
-		entries = append(entries, entry{item: it, y: y, x: x})
+		entries = append(entries, readingEntry{item: it, y: y, x: x})
 	}
 
 	// 将所有表格添加到排序列表
@@ -172,7 +181,7 @@ func (p *Page) ReadingOrder() []ContentItem {
 			BBox:  p.Tables[i].BBox,
 			Table: &p.Tables[i],
 		}
-		entries = append(entries, entry{item: it, y: p.Tables[i].BBox.Y1, x: p.Tables[i].BBox.X0})
+		entries = append(entries, readingEntry{item: it, y: p.Tables[i].BBox.Y1, x: p.Tables[i].BBox.X0})
 	}
 
 	// 将所有图片添加到排序列表
@@ -182,14 +191,26 @@ func (p *Page) ReadingOrder() []ContentItem {
 			BBox:  p.Images[i].BBox,
 			Image: &p.Images[i],
 		}
-		entries = append(entries, entry{item: it, y: p.Images[i].BBox.Y1, x: p.Images[i].BBox.X0})
+		entries = append(entries, readingEntry{item: it, y: p.Images[i].BBox.Y1, x: p.Images[i].BBox.X0})
 	}
 
-	// 按视觉位置排序：Y 值大的优先（视觉上方），Y 值相近时按 X 值小的优先（视觉左侧）
+	if len(entries) == 0 {
+		return nil
+	}
+
+	// 检测栏边界
+	colBoundaries := detectColumnBoundaries(entries, p.Width)
+
+	if len(colBoundaries) > 0 {
+		// 多栏布局：按栏分组，每栏内按 Y 降序，然后从左到右合并
+		return p.columnReadingOrder(entries, colBoundaries)
+	}
+
+	// 单栏布局：直接按 Y 降序、X 升序排序
 	sort.Slice(entries, func(i, j int) bool {
 		dy := entries[i].y - entries[j].y
 		if math.Abs(dy) > 1 {
-			return dy > 0 // Y 值大的排在前面（PDF 坐标系中 Y 向上）
+			return dy > 0
 		}
 		return entries[i].x < entries[j].x
 	})
@@ -197,6 +218,105 @@ func (p *Page) ReadingOrder() []ContentItem {
 	var items []ContentItem
 	for _, e := range entries {
 		items = append(items, e.item)
+	}
+	return items
+}
+
+// detectColumnBoundaries 通过 X0 坐标分布检测页面中的栏边界。
+//
+// 算法：
+//  1. 收集所有内容项的 X0 坐标并排序
+//  2. 在相邻 X0 之间寻找间隔 > 页宽 10% 的位置
+//  3. 对每个候选间隔，要求两侧各有至少 2 个内容项（过滤孤立的居中标题等噪声）
+//  4. 返回所有有效栏边界（每个边界为左右栏分界线的 X 坐标）
+func detectColumnBoundaries(entries []readingEntry, pageWidth float64) []float64 {
+	if len(entries) < 4 {
+		return nil
+	}
+
+	// 收集并排序 X0 值
+	x0s := make([]float64, len(entries))
+	for i, e := range entries {
+		x0s[i] = e.x
+	}
+	sort.Float64s(x0s)
+
+	// 去重：将间隔 < 5 的相邻 X0 合并
+	var grouped []float64
+	for _, x := range x0s {
+		if len(grouped) == 0 || x-grouped[len(grouped)-1] > 5 {
+			grouped = append(grouped, x)
+		}
+	}
+
+	if len(grouped) < 2 {
+		return nil
+	}
+
+	// 寻找显著间隔（> 页宽 10%）
+	minGap := pageWidth * 0.10
+	var boundaries []float64
+	for i := 1; i < len(grouped); i++ {
+		gap := grouped[i] - grouped[i-1]
+		if gap > minGap {
+			mid := (grouped[i] + grouped[i-1]) / 2
+			// 检查两侧是否各有足够的内容项
+			leftCount := 0
+			rightCount := 0
+			for _, e := range entries {
+				if e.x < mid {
+					leftCount++
+				} else {
+					rightCount++
+				}
+			}
+			if leftCount >= 2 && rightCount >= 2 {
+				boundaries = append(boundaries, mid)
+			}
+		}
+	}
+
+	return boundaries
+}
+
+// columnReadingOrder 按栏分组后排序内容项。
+// 每栏内按 Y 降序（从上到下），然后按栏从左到右输出。
+func (p *Page) columnReadingOrder(entries []readingEntry, boundaries []float64) []ContentItem {
+	// 为每个内容项分配栏号
+	col := func(x float64) int {
+		c := 0
+		for _, b := range boundaries {
+			if x >= b {
+				c++
+			}
+		}
+		return c
+	}
+
+	// 按栏分组
+	numCols := len(boundaries) + 1
+	columns := make([][]readingEntry, numCols)
+	for _, e := range entries {
+		c := col(e.x)
+		if c >= numCols {
+			c = numCols - 1
+		}
+		columns[c] = append(columns[c], e)
+	}
+
+	// 每栏内按 Y 降序排序
+	for i := range columns {
+		sort.Slice(columns[i], func(a, b int) bool {
+			return columns[i][a].y > columns[i][b].y
+		})
+	}
+
+	// 从左到右合并各栏
+	var items []ContentItem
+	for _, col := range columns {
+		for _, e := range col {
+			items = append(items, e.item)
+		}
 	}
 	return items
 }
