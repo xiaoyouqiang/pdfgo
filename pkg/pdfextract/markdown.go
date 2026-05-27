@@ -517,10 +517,10 @@ func extractTocEntries(pages []model.Page) []tocEntry {
 	var entries []tocEntry
 	seen := make(map[[2]interface{}]bool)
 
-	// Track base X positions for indent-based level calculation
-	var baseX float64 = -1 // Base indent level (smallest X seen so far)
-	var lastX float64 = -1  // Previous entry's X position
-	var lastLevel int = 0   // Level of previous entry
+	// Track all indent levels: map from originX to the level at that indent
+	indentLevels := make(map[float64]int)
+	var lastX float64 = -1
+	var lastLevel int = 0
 
 	for pgNum, page := range pages {
 		for _, tb := range page.TextBoxes {
@@ -549,23 +549,35 @@ func extractTocEntries(pages []model.Page) []tocEntry {
 					// Strategy 1: Use heading number pattern
 					dots := strings.Count(nm[1], ".")
 					level = dots + 1
+					// Record this level for future reference
+					if _, exists := indentLevels[originX]; !exists {
+						indentLevels[originX] = level
+					}
 				} else {
 					// Strategy 2: Use indent (Origin.X) for level inference
-
-					if baseX < 0 {
-						// First entry, set base
-						baseX = originX
-						lastX = originX
+					if lastX < 0 {
+						// First entry
 						level = 1
+						indentLevels[originX] = level
 					} else if originX == lastX {
 						// Same indent as previous entry
 						level = lastLevel
 					} else if originX > lastX {
 						// More indented than previous, should be child
 						level = lastLevel + 1
+						indentLevels[originX] = level
 					} else {
-						// Less indented, find the level based on current base
-						level = 1
+						// Less indented (originX < lastX), find level based on stored indent levels
+						// Scan from current originX up to lastX to find the parent level
+						parentLevel := 1
+						for x := originX; x <= lastX; x++ {
+							if l, ok := indentLevels[x]; ok {
+								parentLevel = l
+								break
+							}
+						}
+						level = parentLevel
+						indentLevels[originX] = level
 					}
 					lastX = originX
 					lastLevel = level
