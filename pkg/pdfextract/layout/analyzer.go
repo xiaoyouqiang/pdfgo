@@ -136,6 +136,21 @@ func penTrackGroup(chars []model.Char, params Params) []model.TextBox {
 
 	for _, ch := range chars {
 		fs := ch.Font.Size
+		// Font.Size 包含缩放因子，实际字号需要除以缩放因子
+		// 例如：Font.Size=439.0，BBox 高度约 22pt，实际字号约 22pt = 439/20
+		// 但如果 Font.Size 本身就是实际字号（未缩放），直接使用
+		if fs > 0 {
+			// 检测是否包含缩放因子（Font.Size / BBox 高度 ≈ 20）
+			height := ch.BBox.Y1 - ch.BBox.Y0
+			if height > 0 {
+				ratio := fs / height
+				// 如果比例约为 20，说明 Font.Size 包含缩放因子
+				if ratio > 15 && ratio < 25 {
+					fs = height // 使用 BBox 高度作为实际字号
+				}
+				// 否则 Font.Size 已经是实际字号
+			}
+		}
 		if fs <= 0 {
 			fs = penFontSize
 		}
@@ -268,6 +283,7 @@ func penTrackGroup(chars []model.Char, params Params) []model.TextBox {
 					X1: spaceOrigin.X,
 					Y1: spaceOrigin.Y + fs*0.8,
 				},
+				SeqNo: ch.SeqNo - 1,
 			}
 			curLineChars = append(curLineChars, spaceChar)
 		}
@@ -361,6 +377,12 @@ func finalizeLine(chars []model.Char, params Params) model.TextLine {
 			if gap > avgAdvance*params.WordMargin*10 {
 				spaceOrigin := model.Point{X: prev.Origin.X + prev.Advance, Y: prev.Origin.Y}
 				fs := math.Abs(prev.Font.Size)
+				// 空格使用前一个字符的 SeqNo - 1，确保插入的空格排在同一行的字符之后
+				// 不会影响原有字符的顺序
+				spaceSeqNo := prev.SeqNo - 1
+				if spaceSeqNo < 0 {
+					spaceSeqNo = 0
+				}
 				result = append(result, model.Char{
 					Text:    " ",
 					Origin:  spaceOrigin,
@@ -372,6 +394,7 @@ func finalizeLine(chars []model.Char, params Params) model.TextLine {
 						X1: spaceOrigin.X + gap,
 						Y1: spaceOrigin.Y + fs*0.8,
 					},
+					SeqNo: spaceSeqNo,
 				})
 			}
 		}
