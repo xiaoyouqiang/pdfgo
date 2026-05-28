@@ -302,6 +302,22 @@ func lineFontSize(line model.TextLine) float64 {
 // 如果存在标题层级信息（tiers），使用自动分层结果判断标题级别；
 // 否则回退到固定阈值（diff > 2 → H2, diff > 0.5 → H3）。
 func writeTextBoxMarkdown(sb *strings.Builder, tb model.TextBox, bodySize float64, tiers []headingTier, tocEntries []tocEntry) {
+	// 快速路径：如果首行是标题级别，将整个 TextBox 作为单个标题输出。
+	// 避免多行标题（如论文标题换行）被拆成多个独立的 Markdown 标题。
+	if len(tb.Lines) > 0 && len(tiers) > 0 {
+		firstFs := lineFontSize(tb.Lines[0])
+		if level := tierForSize(tiers, firstFs, bodySize); level > 0 {
+			text := strings.TrimSpace(tb.Text())
+			if text != "" && !isTocLine(text) {
+				sb.WriteString(strings.Repeat("#", level))
+				sb.WriteString(" ")
+				sb.WriteString(text)
+				sb.WriteString("\n\n")
+				return
+			}
+		}
+	}
+
 	for _, line := range tb.Lines {
 		text := line.Text()
 		if text == "" {
