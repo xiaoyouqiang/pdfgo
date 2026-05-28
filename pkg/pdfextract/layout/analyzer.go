@@ -6,6 +6,7 @@ package layout
 import (
 	"math"
 	"sort"
+	"unicode"
 
 	"github.com/xiaoyouqiang/pdfgo/pkg/pdfextract/model"
 )
@@ -26,6 +27,18 @@ const (
 	// spaceMaxDist 控制同行字符的水平间距阈值。
 	// 当水平间距超过 fontSize * spaceMaxDist 时，认为可能是新的列。
 	spaceMaxDist = 0.8
+
+	// spaceDist 是检测字符是否移动的最小阈值。
+	// 小于此值认为是零运动（保持在原地）。
+	spaceDist = 0.15
+
+	// fakeBoldMaxDist 用于检测假粗体（同一位置重复绘制的加粗文本）。
+	// 当字符与上一个字符距离小于此值且字符相同，认为是 fake bold。
+	fakeBoldMaxDist = 0.1
+
+	// indentThreshold 用于检测文本缩进（text-indent 段落）。
+	// 当一行起始位置相对行首水平偏移超过此值，且不是 bullet，触发新段落。
+	indentThreshold = 0.5
 )
 
 // Params 控制布局分析的行为参数。
@@ -85,8 +98,8 @@ func Analyze(chars []model.Char, params Params) []model.TextBox {
 	// 通过检测块内连续行是否无 X 重叠来拆分。
 	blocks = splitBlocksAtColumnGaps(blocks)
 
-	// 按阅读顺序排序
-	sortTextBoxes(blocks)
+	// 按阅读顺序排序（已禁用，内容流顺序本身就是阅读顺序）
+	// sortTextBoxes(blocks)
 
 	return blocks
 }
@@ -106,6 +119,12 @@ func Analyze(chars []model.Char, params Params) []model.TextBox {
 //	PDF 内容流通常先画完左栏（从上到下），再画右栏（从上到下）。
 //	当画完左栏底部跳到右栏顶部时，Y 方向产生大幅跳变（baseOffset >> 1.5），
 //	算法自动创建新块，无需显式的栏检测。
+//
+// 补充的 MuPDF 特性：
+//   - Fake Bold 检测：同一位置重复绘制导致加粗效果时，跳过重复字符
+//   - Mark 字符（Mn 类 Unicode）不推进笔位，用于组合音标等
+//   - 缩进检测：text-indent 段落的首行水平缩进超过阈值时触发新块
+//   - Bullet 检测：避免 bullet 列表项后的误判
 func penTrackGroup(chars []model.Char, params Params) []model.TextBox {
 	var blocks []model.TextBox
 	var curLines []model.TextLine
@@ -117,6 +136,22 @@ func penTrackGroup(chars []model.Char, params Params) []model.TextBox {
 	penFontSize := 12.0
 	initialized := false
 
+	// lagPen 用于 fake bold 检测（记录上一个字符的起点）
+	lagPenX := 0.0
+	lagPenY := 0.0
+
+	// startX 记录当前行的起始水平位置，用于缩进检测
+	startX := 0.0
+
+	// maybeBullet 标记上一个字符是否可能是 bullet（用于避免误判段落）
+	maybeBullet := false
+
+	// lastChar 用于 fake bold 检测
+	var lastChar rune = 0
+
+	// curWmode 当前书写模式（0=水平，1=垂直）
+	curWmode := 0
+
 	for _, ch := range chars {
 		fs := ch.Font.Size
 		if fs <= 0 {
@@ -126,12 +161,40 @@ func penTrackGroup(chars []model.Char, params Params) []model.TextBox {
 			fs = 12
 		}
 
+		// 将字符文本转为 rune（处理多字节 Unicode）
+		var charRune rune
+		for _, r := range ch.Text {
+			charRune = r
+			break
+		}
+
+		// === 逻辑 5: Mark 字符（Mn 类 Unicode）不推进笔位 ===
+		// 组合音标等 mark 字符不产生独立位移，直接追加到当前行
+		if unicode.Is(unicode.Mn, charRune) {
+			curLineChars = append(curLineChars, ch)
+			continue
+		}
+
 		if !initialized {
 			curLineChars = []model.Char{ch}
 			penX = ch.Origin.X + ch.Advance
 			penY = ch.Origin.Y
 			penFontSize = fs
+			startX = ch.Origin.X
+			lagPenX = ch.Origin.X
+			lagPenY = ch.Origin.Y
 			initialized = true
+			maybeBullet = isPlausibleBullet(charRune)
+			lastChar = charRune
+			continue
+		}
+
+		// === 逻辑 2: Fake Bold 检测 ===
+		// 如果当前字符与上一字符相同，且当前位置与 lagPen 非常接近，
+		// 说明是同一位置的重复绘制（加粗效果），跳过
+		dist := math.Hypot(ch.Origin.X-lagPenX, ch.Origin.Y-lagPenY) / fs
+		if dist < fakeBoldMaxDist && charRune == lastChar {
+			// 是 fake bold，跳过但不更新 pen（保持位置供后续字符使用）
 			continue
 		}
 
@@ -146,34 +209,45 @@ func penTrackGroup(chars []model.Char, params Params) []model.TextBox {
 
 		newPara := false
 		newLine := false
+		addSpace := false
 
-	// 检测上标字符：字号明显小于当前笔位字号且位于笔位下方（Y 增大的方向）
-	// 上标字符的 origin.Y 会比主文本基线略大（页面坐标系 Y 向下）
-	isSuper := fs < penFontSize*0.75 && baseOffset > 0
+		// === 逻辑 3: Bullet 检测（辅助缩进检测）===
+		// 如果当前行是 bullet 列表，不因缩进触发新段落
+		wasBullet := maybeBullet
+		maybeBullet = isPlausibleBullet(charRune)
 
-	if absBase < baseMaxDist {
-		// 在同一基线上（或非常接近）
-		if math.Abs(spacing) >= spaceMaxDist && !isSuper {
-			// 水平间距过大，可能是表格列 → 新行
-			// 但上标字符即使水平间距大，也应保持同行（因为它本来就该在主文本右上方）
-			newLine = true
-		}
-		// 否则：同一行，不中断
+		if absBase < baseMaxDist {
+			// 在同一基线上（或非常接近）
+			if math.Abs(spacing) < spaceDist {
+				// 运动很小，忽略
+				newLine = false
+			} else if spacing < 0 && spacing > -spaceMaxDist {
+				// 向后运动，重叠字符
+				newLine = false
+			} else if spacing > 0 && spacing < spaceMaxDist {
+				// 向前运动且足够大，添加空格
+				addSpace = true
+				newLine = false
+			} else {
+				// 运动过大（表格列等），新行
+				newLine = true
+			}
 		} else if absBase <= paragraphDist {
-			if isSuper {
-				// 上标字符 → 保持在同一行
-			} else {
-				// 基线偏移适中 → 新行，同块
-				newLine = true
+			// 足够新行但不足以新段落
+			// === 逻辑 1: 缩进检测 - text-indent 段落识别 ===
+			// MuPDF: if (p.x - start.x > 0.5f && !maybe_bullet) new_para = 1;
+			// 仅在水平模式（Wmode=0）且当前不是 bullet 时检测
+			if curWmode == 0 {
+				indent := ch.Origin.X - startX
+				if indent > indentThreshold && !wasBullet {
+					newPara = true
+				}
 			}
+			newLine = true
 		} else {
-			if isSuper {
-				// 上标字符（即使 Y 偏移很大）→ 保持在同一行
-			} else {
-				// 基线偏移过大 → 新块
-				newPara = true
-				newLine = true
-			}
+			// 远离基线 → 新段落
+			newPara = true
+			newLine = true
 		}
 
 		if newPara {
@@ -198,12 +272,40 @@ func penTrackGroup(chars []model.Char, params Params) []model.TextBox {
 			}
 		}
 
+		// 添加空格
+		if addSpace && charRune != ' ' {
+			spaceOrigin := model.Point{X: penX, Y: penY}
+			spaceChar := model.Char{
+				Text:    " ",
+				Origin:  spaceOrigin,
+				Advance: 0,
+				Font:    ch.Font,
+				BBox: model.Rect{
+					X0: spaceOrigin.X,
+					Y0: spaceOrigin.Y - fs*0.8,
+					X1: spaceOrigin.X,
+					Y1: spaceOrigin.Y + fs*0.8,
+				},
+			}
+			curLineChars = append(curLineChars, spaceChar)
+		}
+
 		curLineChars = append(curLineChars, ch)
 
 		// 更新笔位
 		penX = ch.Origin.X + ch.Advance
 		penY = ch.Origin.Y
 		penFontSize = fs
+
+		// 更新 fake bold 检测状态
+		lagPenX = ch.Origin.X
+		lagPenY = ch.Origin.Y
+		lastChar = charRune
+
+		// 更新行首位置（仅在第一字符时设置）
+		if newLine || len(curLineChars) == 1 {
+			startX = ch.Origin.X
+		}
 	}
 
 	// 处理剩余的行和块
@@ -220,12 +322,23 @@ func penTrackGroup(chars []model.Char, params Params) []model.TextBox {
 	return blocks
 }
 
+// isPlausibleBullet 判断字符是否是可能的 bullet（用于避免 bullet 列表后的误判段落）。
+// MuPDF 的 plausible_bullet 函数判断单字符是否是常见 bullet 字符。
+func isPlausibleBullet(r rune) bool {
+	switch r {
+	case '•', '◦', '▪', '▫', '∗', '∙', '｡', '・', 'Ё', 'Ø', '§', '¶', '·':
+		return true
+	}
+	// 数字编号如 "1." 也可能是 bullet
+	return false
+}
+
 // splitBlocksAtColumnGaps 检查每个块内的连续行，如果相邻行无 X 方向重叠，
 // 说明它们属于不同的栏，应拆分为独立的块。
 //
 // 解决的问题：笔位跟踪按 Y 偏移判断行/块边界，当两个文本段位于同一基线
-// 但分属左右栏时（如 "Abstract" 标签和右栏文本），会被错误归入同一块。
-// 通过 X 重叠检测可以发现并修正这种错误。
+// 但分属左右栏时（如 "Abstract" 标签和右栏文本在同一 Y 位置），
+// 会被错误归入同一块。通过 X 重叠检测可以发现并修正这种错误。
 func splitBlocksAtColumnGaps(blocks []model.TextBox) []model.TextBox {
 	var result []model.TextBox
 	for _, block := range blocks {
