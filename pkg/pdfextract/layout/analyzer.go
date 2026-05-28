@@ -224,13 +224,24 @@ func penTrackGroup(chars []model.Char, params Params) []model.TextBox {
 			} else if spacing < 0 && spacing > -spaceMaxDist {
 				// 向后运动，重叠字符
 				newLine = false
-			} else if spacing > 0 && spacing < spaceMaxDist {
-				// 向前运动且足够大，添加空格
-				addSpace = true
-				newLine = false
+			} else if spacing > 0 {
+				// 向前运动
+				if spacing < spaceMaxDist {
+					// 小间距，添加空格
+					addSpace = true
+					newLine = false
+				} else if mayAddSpace(lastChar) {
+					// 大间距但基线非常稳定（absBase 接近 0），只添加空格不创建新行
+					// 这样处理作者行、公式等同行大字间距的情况
+					addSpace = true
+					newLine = false
+				} else {
+					// 大间距且不可添加空格（上一个字符不适合），创建新行
+					newLine = true
+				}
 			} else {
-				// 运动过大（表格列等），新行
-				newLine = true
+				// 负间距（向后运动），保持同一行
+				newLine = false
 			}
 		} else if absBase <= paragraphDist {
 			// 足够新行但不足以新段落
@@ -331,6 +342,18 @@ func isPlausibleBullet(r rune) bool {
 	}
 	// 数字编号如 "1." 也可能是 bullet
 	return false
+}
+
+// mayAddSpace 判断上一个字符后面是否可以添加空格。
+// MuPDF 的 may_add_space 函数：
+// Basic latin, greek, cyrillic, hebrew, arabic, general punctuation,
+// superscripts and subscripts, and currency symbols.
+func mayAddSpace(lastChar rune) bool {
+	if lastChar == ' ' {
+		return false
+	}
+	// Latin, Greek, Cyrillic, Hebrew, Arabic, general punctuation, superscripts/subscripts, currency symbols
+	return lastChar < 0x0700 || (lastChar >= 0x2000 && lastChar <= 0x20CF)
 }
 
 // splitBlocksAtColumnGaps 检查每个块内的连续行，如果相邻行无 X 方向重叠，
