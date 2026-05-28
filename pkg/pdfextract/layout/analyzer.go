@@ -92,15 +92,6 @@ func Analyze(chars []model.Char, params Params) []model.TextBox {
 		}
 	}
 
-	// 后处理：拆分跨越栏边界的块
-	// 笔位跟踪可能将同一基线上但属于不同栏的行归入同一块
-	// （例如 "Abstract" 标签和右栏文本在同一 Y 位置）。
-	// 通过检测块内连续行是否无 X 重叠来拆分。
-	blocks = splitBlocksAtColumnGaps(blocks)
-
-	// 按阅读顺序排序（已禁用，内容流顺序本身就是阅读顺序）
-	// sortTextBoxes(blocks)
-
 	return blocks
 }
 
@@ -228,26 +219,25 @@ func penTrackGroup(chars []model.Char, params Params) []model.TextBox {
 				// 向前运动
 				if spacing < spaceMaxDist {
 					// 小间距，添加空格
-					addSpace = true
-					newLine = false
-				} else if mayAddSpace(lastChar) {
-					// 大间距但基线非常稳定（absBase 接近 0），只添加空格不创建新行
-					// 这样处理作者行、公式等同行大字间距的情况
-					addSpace = true
+					if mayAddSpace(lastChar) {
+						addSpace = true
+					}
 					newLine = false
 				} else {
-					// 大间距且不可添加空格（上一个字符不适合），创建新行
+					// 大间距 → 创建新行（PyMuPDF 逻辑）
 					newLine = true
+					if mayAddSpace(lastChar) {
+						addSpace = true
+					}
 				}
 			} else {
 				// 负间距（向后运动），保持同一行
 				newLine = false
 			}
 		} else if absBase <= paragraphDist {
-			// 足够新行但不足以新段落
-			// === 逻辑 1: 缩进检测 - text-indent 段落识别 ===
-			// MuPDF: if (p.x - start.x > 0.5f && !maybe_bullet) new_para = 1;
-			// 仅在水平模式（Wmode=0）且当前不是 bullet 时检测
+			// 足够新行但不足以新段落（Y偏移在 0.8~1.5 倍字号之间）
+			// MuPDF: Creates new line but stays in same block (paragraph)
+			// 只有当 indent 触发时才是新段落
 			if curWmode == 0 {
 				indent := ch.Origin.X - startX
 				if indent > indentThreshold && !wasBullet {
@@ -255,6 +245,8 @@ func penTrackGroup(chars []model.Char, params Params) []model.TextBox {
 				}
 			}
 			newLine = true
+			// 注意：这里只设置 newLine=true，不设置 newPara=true
+			// 因此不会创建新 block，只会在同一 block 内创建新 line
 		} else {
 			// 远离基线 → 新段落
 			newPara = true
@@ -356,71 +348,6 @@ func mayAddSpace(lastChar rune) bool {
 	return lastChar < 0x0700 || (lastChar >= 0x2000 && lastChar <= 0x20CF)
 }
 
-// splitBlocksAtColumnGaps 检查每个块内的连续行，如果相邻行无 X 方向重叠，
-// 说明它们属于不同的栏，应拆分为独立的块。
-//
-// 解决的问题：笔位跟踪按 Y 偏移判断行/块边界，当两个文本段位于同一基线
-// 但分属左右栏时（如 "Abstract" 标签和右栏文本在同一 Y 位置），
-// 会被错误归入同一块。通过 X 重叠检测可以发现并修正这种错误。
-func splitBlocksAtColumnGaps(blocks []model.TextBox) []model.TextBox {
-	var result []model.TextBox
-	for _, block := range blocks {
-		result = append(result, splitBlockAtColumnGap(block)...)
-	}
-	return result
-}
-
-// splitBlockAtColumnGap 将单个块按栏间隙拆分。
-// 遍历块内连续行，如果当前行与上一行无 X 重叠，则在此处拆分。
-func splitBlockAtColumnGap(block model.TextBox) []model.TextBox {
-	if len(block.Lines) <= 1 {
-		return []model.TextBox{block}
-	}
-
-	var groups [][]model.TextLine
-	var current []model.TextLine
-
-	for _, line := range block.Lines {
-		if len(current) > 0 {
-			prevLine := current[len(current)-1]
-			// 检查 X 方向是否有重叠
-			overlapStart := math.Max(prevLine.BBox.X0, line.BBox.X0)
-			overlapEnd := math.Min(prevLine.BBox.X1, line.BBox.X1)
-			hasXOverlap := overlapEnd > overlapStart
-
-			if !hasXOverlap {
-				// 无 X 重叠，检查是否可能是上标行（不应拆分）
-				if isSuperscriptLinePair(prevLine, line) {
-					// 当前行是上标行，保持在同一块中
-				} else {
-					// 无 X 重叠且非上标 → 不同栏，拆分
-					groups = append(groups, current)
-					current = nil
-				}
-			}
-		}
-		current = append(current, line)
-	}
-	if len(current) > 0 {
-		groups = append(groups, current)
-	}
-
-	if len(groups) <= 1 {
-		return []model.TextBox{block}
-	}
-
-	var result []model.TextBox
-	for _, lines := range groups {
-		tb := model.TextBox{Lines: lines}
-		if len(lines) > 0 {
-			tb.BBox = computeBoxBBox(lines)
-		}
-		result = append(result, tb)
-	}
-	return result
-}
-
-// --- 以下为保留的辅助函数 ---
 
 // finalizeLine 完成一行文本的构建：排序字符，插入词间空格，计算边界框。
 // 当检测到同字体X重叠时（双层渲染PDF），按绘制序号排序以保持内容流顺序；
