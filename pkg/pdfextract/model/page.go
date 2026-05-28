@@ -51,7 +51,9 @@ type TextBox struct {
 	BBox  Rect       // 整个文本框的边界框
 }
 
-// Text 将文本框中所有行的文本拼接，行与行之间用换行符分隔
+// Text 将文本框中所有行的文本拼接，行与行之间用换行符分隔。
+// 只有当上一行以连字符结尾时才用空格连接（表示单词被断开跨行），
+// 其他情况都用换行符连接，保持原始换行结构。
 func (b *TextBox) Text() string {
 	if len(b.Lines) == 0 {
 		return ""
@@ -63,9 +65,12 @@ func (b *TextBox) Text() string {
 	bld := make([]byte, 0, sz)
 	for i, l := range b.Lines {
 		if i > 0 {
-			// 上一行末尾不是连字符，行间插入空格
-			if len(bld) == 0 || bld[len(bld)-1] != '-' {
+			// 上一行末尾是连字符，单词跨行，用空格连接
+			// 否则用换行符连接，保持原始换行结构
+			if len(bld) > 0 && bld[len(bld)-1] == '-' {
 				bld = append(bld, ' ')
+			} else {
+				bld = append(bld, '\n')
 			}
 		}
 		bld = append(bld, l.Text()...)

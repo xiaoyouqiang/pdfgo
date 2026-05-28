@@ -9,11 +9,11 @@ import (
 
 func main() {
 	e := pdfextract.NewExtractor(pdfextract.ExtractionOptions{ExtractText: true})
-	result, _ := e.ExtractFile("2605.23261v1.pdf")
+	result, _ := e.ExtractFile("生生AI规划_20260507110010.pdf")
 
 	var sb strings.Builder
 
-	for pi := 0; pi < 21; pi++ {
+	for pi := 0; pi < 3; pi++ {
 		page := result.Pages[pi]
 		fmt.Fprintf(&sb, "\n======= PAGE %d TextBoxes (%d) =======\n", pi+1, len(page.TextBoxes))
 
@@ -27,5 +27,5 @@ func main() {
 	}
 
 	os.WriteFile("output/textboxes_raw.txt", []byte(sb.String()), 0644)
-	fmt.Println("Saved to output/textboxes_raw.txt")
+	fmt.Println("Saved to output/生生AI规划_20260507110010.pdftextboxes_raw.txt")
 }

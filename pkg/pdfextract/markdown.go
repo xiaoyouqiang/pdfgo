@@ -291,11 +291,20 @@ func findBodyFontSize(pages []model.Page) float64 {
 
 // lineFontSize 返回文本行第一个字符的字体大小。
 // 假设同一行内的所有字符使用相同的字体大小。
+// 如果 Font.Size 包含缩放因子（Font.Size / BBox 高度 ≈ 20），使用 BBox 高度作为实际字号。
 func lineFontSize(line model.TextLine) float64 {
 	if len(line.Chars) == 0 {
 		return 0
 	}
-	return line.Chars[0].Font.Size
+	fs := line.Chars[0].Font.Size
+	height := line.Chars[0].BBox.Y1 - line.Chars[0].BBox.Y0
+	if fs > 0 && height > 0 {
+		ratio := fs / height
+		if ratio > 15 && ratio < 25 {
+			return height
+		}
+	}
+	return fs
 }
 
 // writeTextBoxMarkdown 将一个文本框转换为 Markdown 格式。
