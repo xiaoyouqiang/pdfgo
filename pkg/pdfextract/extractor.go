@@ -192,16 +192,15 @@ func (e *Extractor) extractPage(ctx *pdfcpuModel.Context, pageNum int) (*model.P
 	}
 	result := interpreter.Interpret(contentBytes)
 
-	// 归一化页面旋转：将旋转页面的字符/矩形/线段/图片坐标
-	// 统一变换为标准方向（Rotate=0），使后续布局分析和表格检测无需关心旋转。
+	// 归一化页面旋转和坐标系：将字符/矩形/线段/图片坐标
+	// 统一变换为视觉坐标系（Y 从顶部向下），使后续布局分析无需关心坐标方向。
 	rotate := inhPAttrs.Rotate
-	if rotate != 0 {
-		normalizeRotation(result, rotate, width, height)
-		// 90°/270° 旋转后，页面的视觉宽高互换
-		rotate = ((rotate % 360) + 360) % 360
-		if rotate == 90 || rotate == 270 {
-			width, height = height, width
-		}
+	// 总是调用 normalizeRotation，因为它会处理 Y 翻转
+	normalizeRotation(result, rotate, width, height)
+	// 90°/270° 旋转后，页面的视觉宽高互换
+	rotate = ((rotate % 360) + 360) % 360
+	if rotate == 90 || rotate == 270 {
+		width, height = height, width
 	}
 
 	// 表格检测：基于解释器输出的矩形和线段，检测表格结构
@@ -816,13 +815,14 @@ func (e *Extractor) buildTextBoxes(chars []model.Char) []model.TextBox {
 	return layout.Analyze(chars, layout.DefaultParams())
 }
 
-// normalizeRotation 对解释器输出的所有元素做坐标反旋转变换，
-// 将旋转页面的坐标系归一化为标准方向（Rotate=0），
-// 使得后续的布局分析和表格检测无需关心旋转。
+// normalizeRotation 对解释器输出的所有元素做坐标变换，
+// 将 PDF 坐标系转为视觉坐标系（Y 从顶部向下），
+// 使得后续的布局分析和表格检测无需关心坐标方向。
 //
 // 变换公式（将 PDF 坐标转为视觉坐标，即读者看到的坐标）：
 //
-//	Rotate=90:  visual_x = pdf_y,              visual_y = pageWidth  - pdf_x
+//	Rotate=0:   visual_x = pdf_x,               visual_y = pageHeight - pdf_y
+//	Rotate=90:  visual_x = pdf_y,               visual_y = pageWidth  - pdf_x
 //	Rotate=180: visual_x = pageWidth - pdf_x,  visual_y = pageHeight - pdf_y
 //	Rotate=270: visual_x = pageHeight - pdf_y, visual_y = pdf_x
 //
@@ -830,9 +830,6 @@ func (e *Extractor) buildTextBoxes(chars []model.Char) []model.TextBox {
 func normalizeRotation(result *model.InterpretResult, rotate int, pw, ph float64) {
 	// 归一化到 [0, 360)
 	rotate = ((rotate % 360) + 360) % 360
-	if rotate == 0 {
-		return
-	}
 
 	// 变换所有字符的坐标
 	for i := range result.Chars {
@@ -864,6 +861,9 @@ func normalizeRotation(result *model.InterpretResult, rotate int, pw, ph float64
 // rotatePoint 将一个点从 PDF 页面坐标系变换为视觉坐标系。
 func rotatePoint(p model.Point, rotate int, pw, ph float64) model.Point {
 	switch rotate {
+	case 0:
+		// Y 翻转：PDF Y 从底部向上，视觉 Y 从顶部向下
+		return model.Point{X: p.X, Y: ph - p.Y}
 	case 90:
 		return model.Point{X: p.Y, Y: pw - p.X}
 	case 180:
@@ -879,6 +879,14 @@ func rotatePoint(p model.Point, rotate int, pw, ph float64) model.Point {
 // 由于旋转变换保持轴对齐，只需利用坐标单调性直接变换边界值。
 func rotateRect(r model.Rect, rotate int, pw, ph float64) model.Rect {
 	switch rotate {
+	case 0:
+		// Y 翻转：PDF Y0 是底部，Y1 是顶部；视觉 Y0' = ph - Y1，Y1' = ph - Y0
+		return model.Rect{
+			X0: r.X0,
+			Y0: ph - r.Y1,
+			X1: r.X1,
+			Y1: ph - r.Y0,
+		}
 	case 90:
 		// new_x = old_y (单调增), new_y = pw - old_x (单调减)
 		return model.Rect{

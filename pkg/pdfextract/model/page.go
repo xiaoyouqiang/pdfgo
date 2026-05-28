@@ -58,14 +58,17 @@ func (b *TextBox) Text() string {
 	}
 	sz := 0
 	for _, l := range b.Lines {
-		sz += len(l.Text()) + 1 // +1 用于换行符
+		sz += len(l.Text())
 	}
 	bld := make([]byte, 0, sz)
 	for i, l := range b.Lines {
-		bld = append(bld, l.Text()...)
-		if i < len(b.Lines)-1 {
-			bld = append(bld, '\n')
+		if i > 0 {
+			// 上一行末尾不是连字符，行间插入空格
+			if len(bld) == 0 || bld[len(bld)-1] != '-' {
+				bld = append(bld, ' ')
+			}
 		}
+		bld = append(bld, l.Text()...)
 	}
 	return string(bld)
 }

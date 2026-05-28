@@ -131,17 +131,8 @@ func penTrackGroup(chars []model.Char, params Params) []model.TextBox {
 	lagPenX := 0.0
 	lagPenY := 0.0
 
-	// startX 记录当前行的起始水平位置，用于缩进检测
-	startX := 0.0
-
-	// maybeBullet 标记上一个字符是否可能是 bullet（用于避免误判段落）
-	maybeBullet := false
-
 	// lastChar 用于 fake bold 检测
 	var lastChar rune = 0
-
-	// curWmode 当前书写模式（0=水平，1=垂直）
-	curWmode := 0
 
 	for _, ch := range chars {
 		fs := ch.Font.Size
@@ -171,11 +162,9 @@ func penTrackGroup(chars []model.Char, params Params) []model.TextBox {
 			penX = ch.Origin.X + ch.Advance
 			penY = ch.Origin.Y
 			penFontSize = fs
-			startX = ch.Origin.X
 			lagPenX = ch.Origin.X
 			lagPenY = ch.Origin.Y
 			initialized = true
-			maybeBullet = isPlausibleBullet(charRune)
 			lastChar = charRune
 			continue
 		}
@@ -193,10 +182,8 @@ func penTrackGroup(chars []model.Char, params Params) []model.TextBox {
 		dx := ch.Origin.X - penX
 		dy := ch.Origin.Y - penY
 
-		// 按字号归一化。使用前一个字符的字号（penFontSize）进行归一化，
-		// 这样上标等小字号字符不会因字号小而导致 baseOffset 变大。
-		// PyMuPDF 中 base_offset 计算使用当前字符的 size，但它的 BASE_MAX_DIST
-		// 阈值也较小。实际效果是用前一个字号归一化更符合预期。
+		// 按字号归一化，使阈值对不同字号的文档具有适应性
+		// PyMuPDF: base_offset = delta_y / size，其中 size ≈ font_size
 		normSize := fs
 		if initialized && penFontSize > 0 {
 			normSize = penFontSize
@@ -204,18 +191,14 @@ func penTrackGroup(chars []model.Char, params Params) []model.TextBox {
 		if normSize <= 0 {
 			normSize = 12
 		}
-		spacing := dx / normSize    // 沿基线方向的位移（正=向右）
-		baseOffset := dy / normSize // 垂直于基线的位移（正=向上）
+		spacing := dx / normSize
+		baseOffset := dy / normSize
 		absBase := math.Abs(baseOffset)
 
 		newPara := false
 		newLine := false
 		addSpace := false
 
-		// === 逻辑 3: Bullet 检测（辅助缩进检测）===
-		// 如果当前行是 bullet 列表，不因缩进触发新段落
-		wasBullet := maybeBullet
-		maybeBullet = isPlausibleBullet(charRune)
 
 		if absBase < baseMaxDist {
 			// 在同一基线上（或非常接近）
@@ -227,32 +210,21 @@ func penTrackGroup(chars []model.Char, params Params) []model.TextBox {
 				newLine = false
 			} else if spacing > 0 {
 				// 向前运动
-				if spacing < spaceMaxDist {
-					// 小间距，添加空格，保持同行
-					if mayAddSpace(lastChar) {
-						addSpace = true
-					}
-					newLine = false
-				} else {
-					// 大间距 → 创建新行
-					newLine = true
-					if mayAddSpace(lastChar) {
-						addSpace = true
-					}
+				// MuPDF 风格：同一基线上时，无论间距多大都不创建新行，
+				// 只在需要时添加空格。这避免上标等小字号字符因间距大
+				// 而被拆成独立行。
+				if mayAddSpace(lastChar) {
+					addSpace = true
 				}
+				newLine = false
 			} else {
 				// 负间距（向后运动），保持同行
 				newLine = false
 			}
 		} else if absBase <= paragraphDist {
 			// 基线偏移适中 → 新行（同段落）
-			// 只有当 indent 触发时才是新段落
-			if curWmode == 0 {
-				indent := ch.Origin.X - startX
-				if indent > indentThreshold && !wasBullet {
-					newPara = true
-				}
-			}
+			// MuPDF 原始逻辑：此范围内只创建新行，不升级为新段落。
+			// 不做 indent 检测，避免居中标题等被错误拆分为新块。
 			newLine = true
 		} else {
 			// 远离基线 → 新段落
@@ -312,10 +284,6 @@ func penTrackGroup(chars []model.Char, params Params) []model.TextBox {
 		lagPenY = ch.Origin.Y
 		lastChar = charRune
 
-		// 更新行首位置（仅在第一字符时设置）
-		if newLine || len(curLineChars) == 1 {
-			startX = ch.Origin.X
-		}
 	}
 
 	// 处理剩余的行和块
