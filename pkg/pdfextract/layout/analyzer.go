@@ -193,9 +193,19 @@ func penTrackGroup(chars []model.Char, params Params) []model.TextBox {
 		dx := ch.Origin.X - penX
 		dy := ch.Origin.Y - penY
 
-		// 按字号归一化
-		spacing := dx / fs    // 沿基线方向的位移（正=向右）
-		baseOffset := dy / fs // 垂直于基线的位移（正=向上）
+		// 按字号归一化。使用前一个字符的字号（penFontSize）进行归一化，
+		// 这样上标等小字号字符不会因字号小而导致 baseOffset 变大。
+		// PyMuPDF 中 base_offset 计算使用当前字符的 size，但它的 BASE_MAX_DIST
+		// 阈值也较小。实际效果是用前一个字号归一化更符合预期。
+		normSize := fs
+		if initialized && penFontSize > 0 {
+			normSize = penFontSize
+		}
+		if normSize <= 0 {
+			normSize = 12
+		}
+		spacing := dx / normSize    // 沿基线方向的位移（正=向右）
+		baseOffset := dy / normSize // 垂直于基线的位移（正=向上）
 		absBase := math.Abs(baseOffset)
 
 		newPara := false
@@ -218,25 +228,24 @@ func penTrackGroup(chars []model.Char, params Params) []model.TextBox {
 			} else if spacing > 0 {
 				// 向前运动
 				if spacing < spaceMaxDist {
-					// 小间距，添加空格
+					// 小间距，添加空格，保持同行
 					if mayAddSpace(lastChar) {
 						addSpace = true
 					}
 					newLine = false
 				} else {
-					// 大间距 → 创建新行（PyMuPDF 逻辑）
+					// 大间距 → 创建新行
 					newLine = true
 					if mayAddSpace(lastChar) {
 						addSpace = true
 					}
 				}
 			} else {
-				// 负间距（向后运动），保持同一行
+				// 负间距（向后运动），保持同行
 				newLine = false
 			}
 		} else if absBase <= paragraphDist {
-			// 足够新行但不足以新段落（Y偏移在 0.8~1.5 倍字号之间）
-			// MuPDF: Creates new line but stays in same block (paragraph)
+			// 基线偏移适中 → 新行（同段落）
 			// 只有当 indent 触发时才是新段落
 			if curWmode == 0 {
 				indent := ch.Origin.X - startX
@@ -245,8 +254,6 @@ func penTrackGroup(chars []model.Char, params Params) []model.TextBox {
 				}
 			}
 			newLine = true
-			// 注意：这里只设置 newLine=true，不设置 newPara=true
-			// 因此不会创建新 block，只会在同一 block 内创建新 line
 		} else {
 			// 远离基线 → 新段落
 			newPara = true
@@ -477,7 +484,8 @@ func isSuperscriptBySize(line model.TextLine) bool {
 	if avgSize <= 0 {
 		return false
 	}
-	if avgSize >= 8 {
+	// 上标通常比正文小很多（正文约9-12pt，上标约6-7pt）
+	if avgSize >= 9 {
 		return false
 	}
 	if len(line.Chars) > 30 {

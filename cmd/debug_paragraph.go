@@ -20,15 +20,11 @@ func main() {
 	idxEnd := strings.Index(string(data)[idx:], pageEnd)
 	content := string(data)[idx : idx+idxEnd]
 
-	fmt.Println("=== Page 5 TextBox Y0 分布 ===")
+	fmt.Println("=== Page 5 所有 TextBox Y 分布 ===")
 	fmt.Println()
 
 	lines := strings.Split(content, "\n")
 	tbIdx := -1
-
-	var y0s []float64
-	var x0s []float64
-	var textSummary []string
 
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
@@ -39,23 +35,36 @@ func main() {
 			var nLines int
 			n, _ := fmt.Sscanf(line, "TB[%d] Y0=%f Y1=%f X0=%f X1=%f Lines=%d", &idx, &Y0, &Y1, &X0, &X1, &nLines)
 			if n == 7 {
-				y0s = append(y0s, Y0)
-				x0s = append(x0s, X0)
-				textSummary = append(textSummary, fmt.Sprintf("TB[%d] X0=%.0f Y0=%.0f", tbIdx, X0, Y0))
+				gap := Y0 - Y1
+				fmt.Printf("TB[%2d] Y0=%7.1f Y1=%7.1f gap=%6.1f X0=%6.1f X1=%6.1f\n", 
+					tbIdx, Y0, Y1, gap, X0, X1)
 			}
 		}
 	}
 
-	for _, t := range textSummary {
-		fmt.Println(t)
-	}
-
 	fmt.Println()
-	fmt.Println("=== Y0 相邻差值（检测大跳跃 > 50）===")
-	for i := 1; i < len(y0s); i++ {
-		diff := y0s[i-1] - y0s[i]
-		if diff > 50 {
-			fmt.Printf("  %s → %s: Y差=%.1f\n", textSummary[i-1], textSummary[i], diff)
+	fmt.Println("=== 关键跳跃分析 ===")
+	fmt.Println("Y0相邻差值超过50的点:")
+	
+	lines = strings.Split(content, "\n")
+	var prevY0 float64 = -1
+	tbIdx = -1
+	
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "TB[") {
+			tbIdx++
+			var idx int
+			var Y0 float64
+			fmt.Sscanf(line, "TB[%d] Y0=%f", &idx, &Y0)
+			if prevY0 > 0 {
+				diff := prevY0 - Y0
+				if diff > 50 {
+					fmt.Printf("  TB[%d] → TB[%d]: Y0从%.1f降到%.1f, 差值=%.1f\n", 
+						tbIdx-1, tbIdx, prevY0, Y0, diff)
+				}
+			}
+			prevY0 = Y0
 		}
 	}
 }
