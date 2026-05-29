@@ -1,5 +1,9 @@
 package model
 
+import (
+	"sort"
+)
+
 // Char 是 PDF 内容流解释器输出的最小文本单元，对应 PDF 中的一个字符。
 // 由文本显示操作符（Tj、TJ 等）产生，包含字符文本、位置和字体信息。
 type Char struct {
@@ -140,13 +144,13 @@ type Page struct {
 
 // ReadingOrder 将页面上的所有文本框、表格和图片按视觉阅读顺序排列。
 //
-// TextBoxes 已由布局分析器按内容流顺序排好（sortTextBoxes 已禁用），
+// TextBoxes 已由布局分析器按内容流顺序排好，
 // 笔位跟踪算法确保多栏 PDF 的左右栏被正确分离为独立的 TextBox。
-// 本方法只需将 Table/Image 按位置插入到 TextBox 序列中，
-// 保持内容流的自然顺序不变。
+// Table/Image 按视觉 Y 坐标插入到 TextBox 序列中的正确位置，
+// 保持 TextBox 的内容流顺序不变。
 func (p *Page) ReadingOrder() []ContentItem {
+	// 1. 收集 TextBoxes（保持内容流顺序）
 	var items []ContentItem
-
 	for i := range p.TextBoxes {
 		tb := &p.TextBoxes[i]
 		items = append(items, ContentItem{
@@ -155,25 +159,47 @@ func (p *Page) ReadingOrder() []ContentItem {
 			Text: tb.Text(),
 		})
 	}
+
+	// 2. 收集非文本项（Tables + Images），按 Y0 排序
+	type yItem struct {
+		item ContentItem
+		y0   float64
+	}
+	var nonText []yItem
 	for i := range p.Tables {
-		items = append(items, ContentItem{
-			Type:  "table",
-			BBox:  p.Tables[i].BBox,
-			Table: &p.Tables[i],
+		nonText = append(nonText, yItem{
+			item: ContentItem{Type: "table", BBox: p.Tables[i].BBox, Table: &p.Tables[i]},
+			y0:   p.Tables[i].BBox.Y0,
 		})
 	}
 	for i := range p.Images {
-		items = append(items, ContentItem{
-			Type:  "image",
-			BBox:  p.Images[i].BBox,
-			Image: &p.Images[i],
+		nonText = append(nonText, yItem{
+			item: ContentItem{Type: "image", BBox: p.Images[i].BBox, Image: &p.Images[i]},
+			y0:   p.Images[i].BBox.Y0,
 		})
+	}
+	sort.Slice(nonText, func(i, j int) bool {
+		return nonText[i].y0 < nonText[j].y0
+	})
+
+	// 3. 逐个插入到 TextBox 序列中的正确位置
+	// 插入点：第一个已有项的 Y0 > 非文本项的 Y0（即第一个视觉上更靠下的项之前）
+	for _, ni := range nonText {
+		insertIdx := len(items)
+		for k, it := range items {
+			if it.BBox.Y0 > ni.item.BBox.Y0+1 {
+				insertIdx = k
+				break
+			}
+		}
+		items = append(items, ContentItem{})
+		copy(items[insertIdx+1:], items[insertIdx:])
+		items[insertIdx] = ni.item
 	}
 
 	if len(items) == 0 {
 		return nil
 	}
-
 	return items
 }
 
