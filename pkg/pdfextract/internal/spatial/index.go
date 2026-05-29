@@ -36,7 +36,3 @@ func (idx *Index[T]) Query(bbox model.Rect) []T {
 	return result
 }
 
-// Len 返回索引中的对象数量
-func (idx *Index[T]) Len() int {
-	return len(idx.items)
-}

@@ -340,10 +340,3 @@ func BuildEncodingFromGIDMapping(gidToUnicode map[int]rune) map[byte]rune {
 	return encoding
 }
 
-// ParseCFFcmap 尝试从 CFF 字体数据中提取字符映射。
-// CFF (Compact Font Format) 用于 FontFile3，解析比 TrueType 更复杂。
-// 当前返回 nil，留待后续实现。
-func ParseCFFcmap(data []byte) map[int]rune {
-	_ = data // TODO: 实现 CFF 字体解析
-	return nil
-}

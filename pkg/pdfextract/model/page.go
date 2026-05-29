@@ -40,13 +40,6 @@ func (l *TextLine) Text() string {
 	return string(b)
 }
 
-// FontInfo 返回该行第一个字符的字体信息，用于标题级别判断
-func (l *TextLine) FontInfo() FontInfo {
-	if len(l.Chars) == 0 {
-		return FontInfo{}
-	}
-	return l.Chars[0].Font
-}
 
 // TextBox 表示一个文本块（段落级别），由多行文本组成。
 // 布局分析器将垂直距离较近且有水平重叠的文本行归为同一个文本框。

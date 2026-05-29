@@ -21,12 +21,6 @@ func (r Rect) Width() float64 { return r.X1 - r.X0 }
 // Height 返回矩形的高度
 func (r Rect) Height() float64 { return r.Y1 - r.Y0 }
 
-// MidX 返回矩形中心的 X 坐标
-func (r Rect) MidX() float64 { return (r.X0 + r.X1) / 2 }
-
-// MidY 返回矩形中心的 Y 坐标
-func (r Rect) MidY() float64 { return (r.Y0 + r.Y1) / 2 }
-
 // Contains 判断点 p 是否在矩形内部（包含边界）
 func (r Rect) Contains(p Point) bool {
 	return p.X >= r.X0 && p.X <= r.X1 && p.Y >= r.Y0 && p.Y <= r.Y1

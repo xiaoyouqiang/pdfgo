@@ -328,22 +328,6 @@ func (s *Scanner) scanOperator() (Token, error) {
 	return Token{Type: Operator, Op: op, Value: op}, nil
 }
 
-// ScanAll 读取所有 token 并返回切片
-func (s *Scanner) ScanAll() ([]Token, error) {
-	var tokens []Token
-	for {
-		tok, err := s.Next()
-		if err != nil {
-			return tokens, err
-		}
-		if tok.Type == EOF {
-			break
-		}
-		tokens = append(tokens, tok)
-	}
-	return tokens, nil
-}
-
 // Operand 表示解析后的一个操作数（数字、字符串、名称或数组）
 type Operand struct {
 	Value any

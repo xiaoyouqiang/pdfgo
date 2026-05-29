@@ -1,7 +1,5 @@
 package font
 
-import "github.com/xiaoyouqiang/pdfgo/pkg/pdfextract/model"
-
 // SimpleFontDecoder 处理 Type1、TrueType 和 Type3 简单字体。
 // 简单字体使用单字节编码（每个字符 1 字节），通过以下优先级解码：
 //  1. ToUnicode CMap（最准确，PDF 内嵌的字符映射表）
@@ -84,10 +82,3 @@ func (d *SimpleFontDecoder) FontName() string {
 	return d.name
 }
 
-// FontInfo 返回字体的元信息
-func (d *SimpleFontDecoder) FontInfo() model.FontInfo {
-	return model.FontInfo{
-		Name:     d.name,
-		FontType: d.fontType,
-	}
-}

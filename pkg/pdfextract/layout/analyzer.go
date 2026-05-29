@@ -316,17 +316,6 @@ func penTrackGroup(chars []model.Char, params Params) []model.TextBox {
 	return blocks
 }
 
-// isPlausibleBullet 判断字符是否是可能的 bullet（用于避免 bullet 列表后的误判段落）。
-// MuPDF 的 plausible_bullet 函数判断单字符是否是常见 bullet 字符。
-func isPlausibleBullet(r rune) bool {
-	switch r {
-	case '•', '◦', '▪', '▫', '∗', '∙', '｡', '・', 'Ё', 'Ø', '§', '¶', '·':
-		return true
-	}
-	// 数字编号如 "1." 也可能是 bullet
-	return false
-}
-
 // mayAddSpace 判断上一个字符后面是否可以添加空格。
 // MuPDF 的 may_add_space 函数：
 // Basic latin, greek, cyrillic, hebrew, arabic, general punctuation,
@@ -541,44 +530,6 @@ func hasSameFontOverlap(chars []model.Char) bool {
 	return false
 }
 
-// isSuperscriptLinePair 检测相邻两行是否构成上标行对。
-// 如果前一行 Y 较高（值较小）且字号明显更大，且两行 X 方向有重叠，
-// 则认为后一行是前一行中上标字符分离出来形成的独立行。
-func isSuperscriptLinePair(prevLine, curLine model.TextLine) bool {
-	prevSize := avgFontSizeInLine(prevLine.Chars)
-	curSize := avgFontSizeInLine(curLine.Chars)
-
-	// 如果当前行字号明显更小，可能是上标行
-	if curSize >= prevSize*0.8 {
-		return false
-	}
-
-	// 如果两行 Y 坐标接近（差值小于小字号的一倍），可能是上标
-	// 页面坐标系 Y 向下，所以 Y 值小 = 在上方
-	yDiff := prevLine.BBox.Y0 - curLine.BBox.Y0
-	if yDiff < 0 || yDiff > curSize*2 {
-		return false
-	}
-
-	// 检查 X 方向是否有重叠（允许上标比主文本稍左或稍右）
-	overlapStart := math.Max(prevLine.BBox.X0, curLine.BBox.X0)
-	overlapEnd := math.Min(prevLine.BBox.X1, curLine.BBox.X1)
-
-	// 如果两行 X 有重叠，或者 curLine 整体在 prevLine 右侧不远处，认为是上标
-	// 上标通常紧跟在主文本右侧
-	if overlapEnd > overlapStart {
-		return true // X 有重叠
-	}
-
-	// 如果 curLine 左边界紧跟在 prevLine 右侧（间距小于平均字符宽度）
-	avgWidth := (prevLine.BBox.X1 - prevLine.BBox.X0) / math.Max(float64(len(prevLine.Chars)), 1)
-	if curLine.BBox.X0 > prevLine.BBox.X0 && curLine.BBox.X0 < prevLine.BBox.X1+avgWidth*1.5 {
-		return true
-	}
-
-	return false
-}
-
 // lineBBox 计算一行字符的整体边界框。
 func lineBBox(chars []model.Char) model.Rect {
 	if len(chars) == 0 {
@@ -628,15 +579,4 @@ func computeBoxBBox(lines []model.TextLine) model.Rect {
 		bbox.Y1 = math.Max(bbox.Y1, l.BBox.Y1)
 	}
 	return bbox
-}
-
-// sortTextBoxes 按视觉位置排序文本框：Y 值大的优先（页面上方），同高度时 X 小的优先（左侧）
-func sortTextBoxes(boxes []model.TextBox) {
-	sort.Slice(boxes, func(i, j int) bool {
-		bi, bj := boxes[i].BBox, boxes[j].BBox
-		if math.Abs(bi.Y0-bj.Y0) > 5 {
-			return bi.Y0 > bj.Y0
-		}
-		return bi.X0 < bj.X0
-	})
 }

@@ -204,18 +204,6 @@ func (c *CMap) Decode(code int) []rune {
 	return nil
 }
 
-func (c *CMap) MappingCount() (singles, ranges int) {
-	return len(c.singleMappings), len(c.rangeMappings)
-}
-
-func (c *CMap) AllSingles() map[int][]rune {
-	return c.singleMappings
-}
-
-func (c *CMap) AllRanges() []RangeMapping {
-	return c.rangeMappings
-}
-
 func parseHex(s string) int {
 	s = trimHex(s)
 	if len(s) == 0 {
