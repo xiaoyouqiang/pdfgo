@@ -203,7 +203,6 @@ func penTrackGroup(chars []model.Char, params Params) []model.TextBox {
 		newLine := false
 		addSpace := false
 
-
 		if absBase < baseMaxDist {
 			// 在同一基线上（或非常接近）
 			if math.Abs(spacing) < spaceDist {
@@ -217,9 +216,9 @@ func penTrackGroup(chars []model.Char, params Params) []model.TextBox {
 				// MuPDF 风格：同一基线上时，无论间距多大都不创建新行，
 				// 只在需要时添加空格。这避免上标等小字号字符因间距大
 				// 而被拆成独立行。
-				if mayAddSpace(lastChar) {
-					addSpace = true
-				}
+				//if mayAddSpace(lastChar) {
+				//	addSpace = true
+				//}
 				newLine = false
 			} else {
 				// 负间距（向后运动），保持同行
@@ -316,7 +315,6 @@ func mayAddSpace(lastChar rune) bool {
 	// Latin, Greek, Cyrillic, Hebrew, Arabic, general punctuation, superscripts/subscripts, currency symbols
 	return lastChar < 0x0700 || (lastChar >= 0x2000 && lastChar <= 0x20CF)
 }
-
 
 // finalizeLine 完成一行文本的构建：排序字符，插入词间空格，计算边界框。
 // 当检测到同字体X重叠时（双层渲染PDF），按绘制序号排序以保持内容流顺序；
