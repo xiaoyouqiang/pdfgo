@@ -528,19 +528,40 @@ func bboxKey(r model.Rect) [4]int {
 	}
 }
 
+// indentEntry 记录一个已知的缩进位置及其对应的标题层级。
+// 用于 extractTocEntries 中基于缩进推断 TOC 层级。
+type indentEntry struct {
+	x     float64 // 代表性的 Origin.X 位置
+	level int     // 该缩进对应的标题层级
+}
+
 // extractTocEntries scans all pages for TOC lines and extracts entry titles and levels.
 // Level is determined by:
 //   1. If title has a heading number pattern (e.g., "1.1"), use dot count
-//   2. Otherwise, use the indent (Origin.X) hierarchy: entries with same Origin.X are same level,
-//      entries with larger Origin.X are child of the preceding entry with smaller Origin.X
+//   2. Otherwise, use the indent (Origin.X) hierarchy with tolerance-based matching:
+//      entries within 2pt of a known indent share its level,
+//      more indented entries become children, less indented entries find their parent level
 func extractTocEntries(pages []model.Page) []tocEntry {
 	var entries []tocEntry
 	seen := make(map[[2]interface{}]bool)
 
-	// Track all indent levels: map from originX to the level at that indent
-	indentLevels := make(map[float64]int)
-	var lastX float64 = -1
+	// 已知的缩进层级列表（通常只有 3-5 个）
+	// 用容差比较替代浮点精确匹配，避免 map[float64] 的精度问题
+	var indentList []indentEntry
+	var lastRawX float64 = -1
 	var lastLevel int = 0
+
+	const indentTol = 2.0 // 缩进容差（单位：pt），同一缩进位置的字符 X 差异通常 < 1pt
+
+	// findIndent 在已知缩进列表中查找匹配 x 的条目（容差内）
+	findIndent := func(x float64) (int, bool) {
+		for i, e := range indentList {
+			if math.Abs(e.x-x) < indentTol {
+				return i, true
+			}
+		}
+		return -1, false
+	}
 
 	for pgNum, page := range pages {
 		for _, tb := range page.TextBoxes {
@@ -569,37 +590,35 @@ func extractTocEntries(pages []model.Page) []tocEntry {
 					// Strategy 1: Use heading number pattern
 					dots := strings.Count(nm[1], ".")
 					level = dots + 1
-					// Record this level for future reference
-					if _, exists := indentLevels[originX]; !exists {
-						indentLevels[originX] = level
+					// Record this indent → level mapping for future reference
+					if _, found := findIndent(originX); !found {
+						indentList = append(indentList, indentEntry{x: originX, level: level})
 					}
 				} else {
 					// Strategy 2: Use indent (Origin.X) for level inference
-					if lastX < 0 {
+					if lastRawX < 0 {
 						// First entry
 						level = 1
-						indentLevels[originX] = level
-					} else if originX == lastX {
-						// Same indent as previous entry
-						level = lastLevel
-					} else if originX > lastX {
+						indentList = append(indentList, indentEntry{x: originX, level: level})
+					} else if idx, found := findIndent(originX); found {
+						// Matches a known indent position → use its level
+						level = indentList[idx].level
+					} else if originX > lastRawX {
 						// More indented than previous, should be child
 						level = lastLevel + 1
-						indentLevels[originX] = level
+						indentList = append(indentList, indentEntry{x: originX, level: level})
 					} else {
-						// Less indented (originX < lastX), find level based on stored indent levels
-						// Scan from current originX up to lastX to find the parent level
-						parentLevel := 1
-						for x := originX; x <= lastX; x++ {
-							if l, ok := indentLevels[x]; ok {
-								parentLevel = l
-								break
+						// Less indented than previous but no known indent matches
+						// Find the nearest known indent that is less indented
+						level = 1
+						for _, e := range indentList {
+							if e.x < originX+indentTol && e.level >= level {
+								level = e.level
 							}
 						}
-						level = parentLevel
-						indentLevels[originX] = level
+						indentList = append(indentList, indentEntry{x: originX, level: level})
 					}
-					lastX = originX
+					lastRawX = originX
 					lastLevel = level
 				}
 
