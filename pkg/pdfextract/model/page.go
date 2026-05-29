@@ -2,6 +2,7 @@ package model
 
 import (
 	"sort"
+	"unicode/utf8"
 )
 
 // Char 是 PDF 内容流解释器输出的最小文本单元，对应 PDF 中的一个字符。
@@ -65,7 +66,7 @@ func (b *TextBox) Text() string {
 		if i > 0 {
 			// 上一行末尾是连字符，单词跨行，用空格连接
 			// 否则用换行符连接，保持原始换行结构
-			if len(bld) > 0 && bld[len(bld)-1] == '-' {
+			if endsWithHyphen(bld) {
 				bld = append(bld, ' ')
 			} else {
 				bld = append(bld, '\n')
@@ -74,6 +75,25 @@ func (b *TextBox) Text() string {
 		bld = append(bld, l.Text()...)
 	}
 	return string(bld)
+}
+
+// endsWithHyphen 检查字节切片的最后一个 rune 是否是连字符。
+// 覆盖 ASCII 连字符和常见 Unicode 连字符变体。
+func endsWithHyphen(b []byte) bool {
+	if len(b) == 0 {
+		return false
+	}
+	// 从末尾向前找到最后一个 rune
+	r, _ := utf8.DecodeLastRune(b)
+	switch r {
+	case '-',       // U+002D HYPHEN-MINUS
+		0x2010, // HYPHEN
+		0x2011, // NON-BREAKING HYPHEN
+		0x2012, // FIGURE DASH
+		0x2013: // EN DASH
+		return true
+	}
+	return false
 }
 
 // Cell 表示表格中的一个单元格。
