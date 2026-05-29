@@ -13,8 +13,9 @@ type Char struct {
 	Font      FontInfo // 字符的字体信息
 	Advance   float64  // 水平前进宽度（渲染后光标移动的距离）
 	FormObjNr int      // 产生此字符的 Form XObject 对象编号（0=页面直接内容）
-	SeqNo     int      // 字符在内容流中的绘制序号（用于双层渲染去重：后绘制的覆盖先绘制的）
-	Clipped   bool     // 字符是否在裁剪路径内产生（W/W* 操作符后的隐藏层文本）
+	VisualSize float64 // 经过 CTM 变换后的实际视觉字号（单位：pt），比 Font.Size 更准确
+	SeqNo      int     // 字符在内容流中的绘制序号（用于双层渲染去重：后绘制的覆盖先绘制的）
+	Clipped    bool    // 字符是否在裁剪路径内产生（W/W* 操作符后的隐藏层文本）
 }
 
 // TextLine 表示一行文本，由多个连续的 Char 组成。

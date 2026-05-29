@@ -135,21 +135,10 @@ func penTrackGroup(chars []model.Char, params Params) []model.TextBox {
 	var lastChar rune = 0
 
 	for _, ch := range chars {
-		fs := ch.Font.Size
-		// Font.Size 包含缩放因子，实际字号需要除以缩放因子
-		// 例如：Font.Size=439.0，BBox 高度约 22pt，实际字号约 22pt = 439/20
-		// 但如果 Font.Size 本身就是实际字号（未缩放），直接使用
-		if fs > 0 {
-			// 检测是否包含缩放因子（Font.Size / BBox 高度 ≈ 20）
-			height := ch.BBox.Y1 - ch.BBox.Y0
-			if height > 0 {
-				ratio := fs / height
-				// 如果比例约为 20，说明 Font.Size 包含缩放因子
-				if ratio > 15 && ratio < 25 {
-					fs = height // 使用 BBox 高度作为实际字号
-				}
-				// 否则 Font.Size 已经是实际字号
-			}
+		// 获取字符的实际视觉字号
+		fs := ch.VisualSize
+		if fs <= 0 {
+			fs = ch.Font.Size
 		}
 		if fs <= 0 {
 			fs = penFontSize

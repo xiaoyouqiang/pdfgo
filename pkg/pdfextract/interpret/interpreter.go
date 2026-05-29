@@ -450,8 +450,9 @@ func (ci *ContentInterpreter) showString(data []byte) {
 			Origin:    model.Point{X: x, Y: y},
 			BBox:      bbox,
 			Font:      ci.buildFontInfo(),
-			Advance:   charWidthPage,
-			FormObjNr: ci.currentFormObjNr,
+			Advance:    charWidthPage,
+				VisualSize: charHeightPage,
+				FormObjNr:  ci.currentFormObjNr,
 			SeqNo:     ci.charSeqNo,
 			Clipped:   ci.gState.ClipApplied,
 		})
@@ -492,11 +493,12 @@ func (ci *ContentInterpreter) showStrings(operands []Operand) {
 						if effFontSize > 0 && pageGap > effFontSize*0.1 {
 							ci.charSeqNo++
 							ci.result.Chars = append(ci.result.Chars, model.Char{
-								Text:    " ",
-								Origin:  model.Point{X: oldX, Y: oldY},
-								Advance: pageGap,
-								Font:    ci.buildFontInfo(),
-								SeqNo:   ci.charSeqNo,
+								Text:       " ",
+								Origin:     model.Point{X: oldX, Y: oldY},
+								Advance:    pageGap,
+								Font:       ci.buildFontInfo(),
+								VisualSize: effFontSize,
+								SeqNo:      ci.charSeqNo,
 							})
 						}
 					}

@@ -290,19 +290,14 @@ func findBodyFontSize(pages []model.Page) float64 {
 }
 
 // lineFontSize 返回文本行第一个字符的字体大小。
-// 假设同一行内的所有字符使用相同的字体大小。
-// 如果 Font.Size 包含缩放因子（Font.Size / BBox 高度 ≈ 20），使用 BBox 高度作为实际字号。
+// 优先使用 VisualSize（经过 CTM 变换的实际视觉字号），回退到 Font.Size。
 func lineFontSize(line model.TextLine) float64 {
 	if len(line.Chars) == 0 {
 		return 0
 	}
-	fs := line.Chars[0].Font.Size
-	height := line.Chars[0].BBox.Y1 - line.Chars[0].BBox.Y0
-	if fs > 0 && height > 0 {
-		ratio := fs / height
-		if ratio > 15 && ratio < 25 {
-			return height
-		}
+	fs := line.Chars[0].VisualSize
+	if fs <= 0 {
+		fs = line.Chars[0].Font.Size
 	}
 	return fs
 }
