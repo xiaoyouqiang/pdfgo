@@ -12,9 +12,9 @@ import (
 
 // tocEntry 表示从 PDF 目录行中提取的一个条目。
 type tocEntry struct {
-	title    string  // 目录条目标题，如 "1 目的 Purpose"
-	level    int     // 标题层级：1=H2, 2=H3, 3=H4
-	originX  float64 // 第一个字符的 Origin.X，用于基于缩进计算层级
+	title   string  // 目录条目标题，如 "1 目的 Purpose"
+	level   int     // 标题层级：1=H2, 2=H3, 3=H4
+	originX float64 // 第一个字符的 Origin.X，用于基于缩进计算层级
 }
 
 // tocLineRe 匹配 PDF 风格的目录行，提取标题部分。
@@ -26,9 +26,9 @@ var headingNumRe = regexp.MustCompile(`^(\d+(?:\.\d+)*)\s`)
 
 // 以下正则用于清洗目录行中的多余点号和空格
 var (
-	dotGapRe    = regexp.MustCompile(`[.。…]\s+[.。…]`)   // 点号之间的空格
-	dotNumGapRe = regexp.MustCompile(`[.。…]\s+(\d)`)     // 点号和数字之间的空格
-	numDotGapRe = regexp.MustCompile(`(\d)\s+[.。…]`)     // 数字和点号之间的空格
+	dotGapRe       = regexp.MustCompile(`[.。…]\s+[.。…]`)  // 点号之间的空格
+	dotNumGapRe    = regexp.MustCompile(`[.。…]\s+(\d)`)   // 点号和数字之间的空格
+	numDotGapRe    = regexp.MustCompile(`(\d)\s+[.。…]`)   // 数字和点号之间的空格
 	trailingDotsRe = regexp.MustCompile(`(\d)[.。…]+\s*$`) // 页码数字后的多余点号
 )
 
@@ -48,6 +48,8 @@ var (
 func PagesToMarkdown(pages []model.Page) string {
 	// 第一步：过滤页眉页脚
 	FilterHeadersFooters(pages)
+	// 过滤竖排/旋转文本（极端宽高比的 TextBox，如 arXiv 侧边栏）
+	//filterVerticalTextboxes(pages)
 	// 第二步：提取目录条目（TOC-based 标题检测）
 	tocEntries := extractTocEntries(pages)
 
@@ -138,6 +140,24 @@ func FilterHeadersFooters(pages []model.Page) {
 				tb.Lines = keep
 				filtered = append(filtered, tb)
 			}
+		}
+		pages[pi].TextBoxes = filtered
+	}
+}
+
+// filterVerticalTextboxes 移除极端宽高比的 TextBox，用于过滤竖排/旋转文本。
+// 竖排文本的特征是宽度远小于高度（如 arXiv 论文侧边栏），
+// 正常文本即使很窄（如单字符 "AB"），宽高比也 > 0.5。
+func filterVerticalTextboxes(pages []model.Page) {
+	for pi := range pages {
+		var filtered []model.TextBox
+		for _, tb := range pages[pi].TextBoxes {
+			w := tb.BBox.X1 - tb.BBox.X0
+			h := tb.BBox.Y1 - tb.BBox.Y0
+			if h > 50 && w/h < 0.2 {
+				continue
+			}
+			filtered = append(filtered, tb)
 		}
 		pages[pi].TextBoxes = filtered
 	}
@@ -356,18 +376,18 @@ func writeTextBoxMarkdown(sb *strings.Builder, tb model.TextBox, bodySize float6
 			}
 		}
 
-			// 回退：基于编号模式检测 TOC 中未收录的子标题
-			// 当正文中出现形如 "6.1.1 标题" 的编号行，且其前缀（如 "6.1"）
-			// 存在于 TOC 中，但该编号本身不在 TOC 中时，按编号深度推断标题层级
-			if len(tocEntries) > 0 && !isTOC {
-				if level := matchPatternHeading(text, tocEntries); level > 0 {
-					sb.WriteString(strings.Repeat("#", level+1))
-					sb.WriteString(" ")
-					sb.WriteString(text)
-					sb.WriteString("\n\n")
-					continue
-				}
+		// 回退：基于编号模式检测 TOC 中未收录的子标题
+		// 当正文中出现形如 "6.1.1 标题" 的编号行，且其前缀（如 "6.1"）
+		// 存在于 TOC 中，但该编号本身不在 TOC 中时，按编号深度推断标题层级
+		if len(tocEntries) > 0 && !isTOC {
+			if level := matchPatternHeading(text, tocEntries); level > 0 {
+				sb.WriteString(strings.Repeat("#", level+1))
+				sb.WriteString(" ")
+				sb.WriteString(text)
+				sb.WriteString("\n\n")
+				continue
 			}
+		}
 
 		fs := lineFontSize(line)
 
@@ -537,10 +557,10 @@ type indentEntry struct {
 
 // extractTocEntries scans all pages for TOC lines and extracts entry titles and levels.
 // Level is determined by:
-//   1. If title has a heading number pattern (e.g., "1.1"), use dot count
-//   2. Otherwise, use the indent (Origin.X) hierarchy with tolerance-based matching:
-//      entries within 2pt of a known indent share its level,
-//      more indented entries become children, less indented entries find their parent level
+//  1. If title has a heading number pattern (e.g., "1.1"), use dot count
+//  2. Otherwise, use the indent (Origin.X) hierarchy with tolerance-based matching:
+//     entries within 2pt of a known indent share its level,
+//     more indented entries become children, less indented entries find their parent level
 func extractTocEntries(pages []model.Page) []tocEntry {
 	var entries []tocEntry
 	seen := make(map[[2]interface{}]bool)

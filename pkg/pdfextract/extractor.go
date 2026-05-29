@@ -1567,9 +1567,9 @@ func detectTitle(pages []model.Page) string {
 	if len(candidates) == 0 {
 		return ""
 	}
-	// 按 Y 降序排序（PDF 坐标系 Y 向上，高 Y = 页面顶部）
+	// 按 Y 升序排序（视觉坐标系 Y 向下，低 Y = 页面顶部）
 	sort.Slice(candidates, func(i, j int) bool {
-		return candidates[i].y > candidates[j].y
+		return candidates[i].y < candidates[j].y
 	})
 	// 取页面顶部第一个非页眉页脚行，判断是否居中
 	c := candidates[0]
