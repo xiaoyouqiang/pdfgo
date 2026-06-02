@@ -127,6 +127,9 @@ func penTrackGroup(chars []model.Char, params Params) []model.TextBox {
 	penFontSize := 12.0
 	initialized := false
 
+	// blockStartX
+	blockStartX := 0.0
+
 	// lagPen 用于 fake bold 检测（记录上一个字符的起点）
 	lagPenX := 0.0
 	lagPenY := 0.0
@@ -166,6 +169,7 @@ func penTrackGroup(chars []model.Char, params Params) []model.TextBox {
 			penX = ch.Origin.X + ch.Advance
 			penY = ch.Origin.Y
 			penFontSize = fs
+			blockStartX = ch.Origin.X
 			lagPenX = ch.Origin.X
 			lagPenY = ch.Origin.Y
 			initialized = true
@@ -225,10 +229,13 @@ func penTrackGroup(chars []model.Char, params Params) []model.TextBox {
 				newLine = false
 			}
 		} else if absBase <= paragraphDist {
-			// 基线偏移适中 → 新行（同段落）
-			// MuPDF 原始逻辑：此范围内只创建新行，不升级为新段落。
-			// 不做 indent 检测，避免居中标题等被错误拆分为新块。
+			// base offset moderate -> new line
 			newLine = true
+			// indent detection: upgrade to new block if X delta is significant
+			indentDelta := ch.Origin.X - blockStartX
+			if indentDelta > normSize * indentThreshold {
+				newPara = true
+			}
 		} else {
 			// 远离基线 → 新段落
 			newPara = true
@@ -249,6 +256,7 @@ func penTrackGroup(chars []model.Char, params Params) []model.TextBox {
 				})
 				curLines = nil
 			}
+			blockStartX = ch.Origin.X
 		} else if newLine {
 			// 结束当前行
 			if len(curLineChars) > 0 {
