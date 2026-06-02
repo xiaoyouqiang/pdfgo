@@ -153,8 +153,6 @@ func detectFromEdges(edges []Edge, chars []model.Char, settings TableSettings) [
 	// 第七步：将文本字符分配到各单元格中
 	for i := range kept {
 		assignText(&kept[i], chars)
-		// PDF 坐标系 Y 轴向上，需要翻转行序以匹配视觉顺序
-		kept[i] = reverseRowOrder(kept[i])
 	}
 
 	// 按视觉位置排序表格

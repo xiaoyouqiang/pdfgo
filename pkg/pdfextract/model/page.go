@@ -1,6 +1,7 @@
 package model
 
 import (
+	"math"
 	"sort"
 	"unicode/utf8"
 )
@@ -196,20 +197,24 @@ func (p *Page) ReadingOrder() []ContentItem {
 		return nonText[i].y0 < nonText[j].y0
 	})
 
-	// 3. 逐个插入到 TextBox 序列中的正确位置
-	// 插入点：第一个已有项的 Y0 > 非文本项的 Y0（即第一个视觉上更靠下的项之前）
-	for _, ni := range nonText {
-		insertIdx := len(items)
-		for k, it := range items {
-			if it.BBox.Y0 > ni.item.BBox.Y0+1 {
-				insertIdx = k
-				break
+		// 3. 逐个插入到 TextBox 序列中的正确位置
+		// 插入点：Y0 > 非文本项 Y0 的所有项中，Y0 最小的那个项之前。
+		// 使用最小 Y0 差值而非第一个命中，避免页码等底部元素（内容流靠前但 Y 值大）导致误插入。
+		for _, ni := range nonText {
+			insertIdx := len(items)
+			bestDelta := math.MaxFloat64
+			niY0 := ni.item.BBox.Y0
+			for k, it := range items {
+				delta := it.BBox.Y0 - niY0
+				if delta > 1 && delta < bestDelta {
+					bestDelta = delta
+					insertIdx = k
+				}
 			}
+			items = append(items, ContentItem{})
+			copy(items[insertIdx+1:], items[insertIdx:])
+			items[insertIdx] = ni.item
 		}
-		items = append(items, ContentItem{})
-		copy(items[insertIdx+1:], items[insertIdx:])
-		items[insertIdx] = ni.item
-	}
 
 	if len(items) == 0 {
 		return nil

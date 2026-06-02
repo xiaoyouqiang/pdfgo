@@ -130,6 +130,7 @@ func SplitPDFDocument(filePath string, imageDir string, imagePrefix string, limi
 	// 创建分段模型并执行分段
 	model := split.NewSplitModel(nil, withFilter, filterToc, limit)
 	results := model.Parse(markdown)
+	results = split.SplitLargeBlocks(results, 256, 0, false)
 
 	return results, nil
 }
