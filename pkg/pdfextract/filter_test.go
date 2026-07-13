@@ -205,3 +205,111 @@ func mkLine(s string) model.TextLine {
 	}
 	return tl
 }
+
+// 构造一个 Table，cells 按行传入（每行字符串切片）
+func makeTable(cells [][]string) model.Table {
+	rows := len(cells)
+	cols := 0
+	for _, r := range cells {
+		if len(r) > cols {
+			cols = len(r)
+		}
+	}
+	tbl := model.Table{Rows: rows, Cols: cols, Cells: make([][]model.Cell, rows)}
+	for ri, row := range cells {
+		tbl.Cells[ri] = make([]model.Cell, len(row))
+		for ci, text := range row {
+			tbl.Cells[ri][ci] = model.Cell{Text: text, Row: ri, Col: ci}
+		}
+	}
+	return tbl
+}
+
+func TestApplyLineFilters_TableSubstring(t *testing.T) {
+	pages := []model.Page{{
+		PageNum: 1,
+		Tables: []model.Table{
+			makeTable([][]string{{"文件名称", "生物之芯"}, {"文件编号", "SS-SOP"}}),
+			makeTable([][]string{{"姓名", "张三"}, {"年龄", "30"}}),
+		},
+	}}
+	ApplyLineFilters(pages, []LineFilter{
+		{Contains: []string{"文件名称"}, Target: TargetTable},
+	})
+	if len(pages[0].Tables) != 1 {
+		t.Fatalf("expected 1 table left, got %d", len(pages[0].Tables))
+	}
+	first := pages[0].Tables[0].Cells[0][0].Text
+	if first != "姓名" {
+		t.Errorf("remaining table should be the one without 文件名称; got first cell %q", first)
+	}
+}
+
+func TestApplyLineFilters_TableRegex(t *testing.T) {
+	pages := []model.Page{{
+		PageNum: 2,
+		Tables: []model.Table{
+			makeTable([][]string{{"版本"}, {"A/0"}}),
+			makeTable([][]string{{"日期"}, {"2024"}}),
+		},
+	}}
+	ApplyLineFilters(pages, []LineFilter{
+		{Pages: []int{2}, Regex: []string{`^版本$`}, Target: TargetTable},
+	})
+	if len(pages[0].Tables) != 1 {
+		t.Fatalf("expected 1 table, got %d", len(pages[0].Tables))
+	}
+	if pages[0].Tables[0].Cells[0][0].Text != "日期" {
+		t.Errorf("wrong table kept: %q", pages[0].Tables[0].Cells[0][0].Text)
+	}
+}
+
+func TestApplyLineFilters_TablePageScoped(t *testing.T) {
+	t1 := makeTable([][]string{{"X"}})
+	t2 := makeTable([][]string{{"X"}})
+	pages := []model.Page{
+		{PageNum: 1, Tables: []model.Table{t1}},
+		{PageNum: 2, Tables: []model.Table{t2}},
+	}
+	ApplyLineFilters(pages, []LineFilter{
+		{Pages: []int{1}, Contains: []string{"X"}, Target: TargetTable},
+	})
+	if len(pages[0].Tables) != 0 || len(pages[1].Tables) != 1 {
+		t.Errorf("page-scoped table filter: p1=%d p2=%d, want 0 and 1", len(pages[0].Tables), len(pages[1].Tables))
+	}
+}
+
+func TestApplyLineFilters_TableAndTextBoxIndependent(t *testing.T) {
+	// 同时配置 TextBox 和 Table 规则，验证互不干扰
+	pages := []model.Page{{
+		PageNum: 1,
+		TextBoxes: []model.TextBox{{Lines: []model.TextLine{mkLine("噪声文本")}}},
+		Tables:    []model.Table{makeTable([][]string{{"噪声表格"}})},
+	}}
+	ApplyLineFilters(pages, []LineFilter{
+		{Contains: []string{"噪声文本"}},                                       // TextBox
+		{Contains: []string{"噪声表格"}, Target: TargetTable},                  // Table
+	})
+	if len(pages[0].TextBoxes) != 0 {
+		t.Errorf("TextBox should be dropped, got %d", len(pages[0].TextBoxes))
+	}
+	if len(pages[0].Tables) != 0 {
+		t.Errorf("Table should be dropped, got %d", len(pages[0].Tables))
+	}
+}
+
+func TestApplyLineFilters_TableNoHitKeepsAll(t *testing.T) {
+	pages := []model.Page{{
+		PageNum: 1,
+		Tables: []model.Table{
+			makeTable([][]string{{"A"}}),
+			makeTable([][]string{{"B"}}),
+		},
+	}}
+	ApplyLineFilters(pages, []LineFilter{
+		{Contains: []string{"Z"}, Target: TargetTable},
+	})
+	if len(pages[0].Tables) != 2 {
+		t.Errorf("no hit should keep all tables: got %d", len(pages[0].Tables))
+	}
+}

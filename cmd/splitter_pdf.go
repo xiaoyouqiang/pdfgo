@@ -29,6 +29,9 @@ import (
 const defaultLimit = 4096
 
 // go run cmd/splitter_pdf.go -i "生生AI规划222.pdf"  -image-dir ./images
+// go run cmd/splitter_pdf.go -i "生生AI规划222.pdf" -drop '*:table:文件名称 //在所有页检测 文件名字 关键词，删除命中的表格
+// go run cmd/splitter_pdf.go -i "生生AI规划222.pdf" -drop '*:table:文件名称 //在所有页检测 文件名字 关键词，删除命中的表格
+// go run cmd/splitter_pdf.go -i "生生AI规划222.pdf" "1,2:目录,文件信息,Contents" -drop '1,2:~目\s*录' //在第一页和第二页 检测 目录,文件信息,Contents，命中的行删除，命中 ~目\s*录 的删除
 func main() {
 	var (
 		inputFile  string // 输入 PDF 文件路径
@@ -49,10 +52,11 @@ func main() {
 	flag.IntVar(&limit, "limit", defaultLimit, "每个分段的最大字符数")
 	flag.BoolVar(&withFilter, "filter", true, "是否过滤特殊字符")
 	flag.BoolVar(&filterToc, "filter-toc", false, "是否过滤 PDF 目录条目（识别 标题...页码 格式的目录行）")
-	flag.Var(&drops, "drop", `按页码过滤文本行，可重复。格式 PAGES:PATTERNS。
+	flag.Var(&drops, "drop", `按页码过滤文本/表格，可重复。格式 PAGES:[table:]PATTERNS。
 PAGES: 1 | 1,2,3 | 1-3 | *（所有页）
 PATTERNS: 逗号分隔；前缀 ~ 表示正则
-示例: -drop "1:目录,文件信息"  -drop "*:~^第\d+页$"`)
+table: 可选前缀，切换为表格模式（任一单元格命中即删整个 Table）
+示例: -drop "1:目录"  -drop "*:~^第\d+页$"  -drop "*:table:文件名称,文件编号"`)
 	flag.Parse()
 
 	// 校验必填参数
@@ -154,12 +158,15 @@ func SplitPDFDocument(filePath string, imageDir string, imagePrefix string, limi
 // 格式：PAGES:PATTERNS，可累积多次 -drop。
 //   - PAGES: "*" 表示所有页；"1"、"1,2,3"、"1-3" 表示指定页码
 //   - PATTERNS: 逗号分隔；前缀 "~" 表示正则，否则为子串
+//   - 前缀 "table:"（紧跟在 PAGES: 之后）切换为表格过滤模式：
+//     表格中任一单元格命中即整个 Table 删除（不影响 TextBox）
 //
 // 示例：
 //
-//	-drop "1:目录,文件信息"
-//	-drop "*:~^第\d+页$"
-//	-drop "1-3:页脚"
+//	-drop "1:目录,文件信息"            # 第 1 页 TextBox 含"目录"或"文件信息"的行
+//	-drop "*:~^第\d+页$"               # 所有页正则匹配的行
+//	-drop "*:table:文件名称,文件编号"   # 所有页含这些文本的表格整个删除
+//	-drop "1:table:~^修改记录$"        # 第 1 页表头为"修改记录"的表格删除
 type dropFilterValue struct {
 	filters []pdfextract.LineFilter
 }
@@ -175,6 +182,16 @@ func (d *dropFilterValue) Set(s string) error {
 	patsStr := s[idx+1:]
 	if pagesStr == "" || patsStr == "" {
 		return fmt.Errorf("invalid -drop %q: PAGES and PATTERNS must not be empty", s)
+	}
+
+	// 检测 table: 前缀 → 切换为表格模式
+	target := pdfextract.TargetTextBox
+	if strings.HasPrefix(patsStr, "table:") {
+		target = pdfextract.TargetTable
+		patsStr = patsStr[len("table:"):]
+		if patsStr == "" {
+			return fmt.Errorf("invalid -drop %q: table: requires patterns", s)
+		}
 	}
 
 	var pages []int
@@ -224,7 +241,8 @@ func (d *dropFilterValue) Set(s string) error {
 		Pages:    pages,
 		Contains: contains,
 		Regex:    regex,
-		Scope:    pdfextract.FilterLine, // 命令行固定行级；Box 级请使用 Go API
+		Scope:    pdfextract.FilterLine, // 命令行 TextBox 模式固定行级；Box 级请使用 Go API
+		Target:   target,
 	})
 	return nil
 }
