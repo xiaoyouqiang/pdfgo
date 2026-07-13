@@ -325,17 +325,31 @@ func mayAddSpace(lastChar rune) bool {
 }
 
 // finalizeLine 完成一行文本的构建：排序字符，插入词间空格，计算边界框。
-// 当检测到同字体X重叠时（双层渲染PDF），按绘制序号排序以保持内容流顺序；
-// 否则按X坐标排序（普通PDF的正常布局顺序）。
+//
+// 排序策略（方案 B，无阈值）：
+//  1. 先按 X 坐标排序，X 相同的按 SeqNo 排序（稳定化）。
+//  2. 扫描相邻字符的 SeqNo：如果 X 排序后存在任何相邻 SeqNo 倒序，
+//     说明绘制顺序（SeqNo）才是真正的阅读顺序，而不是 X 顺序。
+//     这通常发生在双层模板 PDF：基础层与校正层字符交错绘制，
+//     X 坐标可能错位。此时回退到 SeqNo 顺序，与 MuPDF 的处理方式一致
+//     （MuPDF 的 fz_add_stext_char_imp 中 spacing<0 时直接 new_line=0，
+//     并按到达顺序追加字符，不重排）。
 func finalizeLine(chars []model.Char, params Params) model.TextLine {
-	if hasSameFontOverlap(chars) {
-		sort.Slice(chars, func(i, j int) bool {
-			return chars[i].SeqNo < chars[j].SeqNo
-		})
-	} else {
-		sort.Slice(chars, func(i, j int) bool {
+	sort.Slice(chars, func(i, j int) bool {
+		if chars[i].Origin.X != chars[j].Origin.X {
 			return chars[i].Origin.X < chars[j].Origin.X
-		})
+		}
+		return chars[i].SeqNo < chars[j].SeqNo
+	})
+
+	// 检测 X 排序是否引入 SeqNo 逆序。任一相邻对倒序即说明 X 顺序不可靠。
+	for i := 0; i+1 < len(chars); i++ {
+		if chars[i].SeqNo > chars[i+1].SeqNo {
+			sort.Slice(chars, func(a, b int) bool {
+				return chars[a].SeqNo < chars[b].SeqNo
+			})
+			break
+		}
 	}
 
 	// 估算平均字符前进宽度
@@ -504,25 +518,6 @@ func avgFontSizeInLine(chars []model.Char) float64 {
 		return sum / count
 	}
 	return 0
-}
-
-// hasSameFontOverlap 检测同一字体中是否有字符在 X 方向上重叠。
-func hasSameFontOverlap(chars []model.Char) bool {
-	type fontSpan struct{ x0, x1 float64 }
-	spans := make(map[string][]fontSpan)
-	for _, c := range chars {
-		x0 := c.Origin.X
-		x1 := c.Origin.X + c.Advance
-		s := spans[c.Font.Name]
-		for _, existing := range s {
-			overlap := math.Min(x1, existing.x1) - math.Max(x0, existing.x0)
-			if overlap > 0 {
-				return true
-			}
-		}
-		spans[c.Font.Name] = append(spans[c.Font.Name], fontSpan{x0, x1})
-	}
-	return false
 }
 
 // lineBBox 计算一行字符的整体边界框。
