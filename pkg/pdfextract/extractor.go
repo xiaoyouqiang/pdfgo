@@ -58,6 +58,14 @@ func DefaultExtractionOptions() ExtractionOptions {
 // 它是 pdfextract 包的主要入口点。
 type Extractor struct {
 	opts ExtractionOptions
+
+	// fontCache 缓存已构建的字体解码器，按字体字典的 PDF 对象编号索引。
+	// 同一字体对象会在多个页面和 Form XObject 中被引用，缓存避免重复解析
+	// （解析 ToUnicode CMap 和嵌入字体程序的开销很大）。
+	fontCache map[int]font.FontDecoder
+	// formCache 缓存已解析的 Form XObject，按对象编号索引。
+	// Form XObject 通常在多个页面间共享，缓存避免重复解码内容流和重建字体。
+	formCache map[int]*interpret.FormXObject
 }
 
 // NewExtractor 使用给定的选项创建一个新的 PDF 提取器。
@@ -86,6 +94,10 @@ func (e *Extractor) ExtractBytes(data []byte) (*model.ExtractionResult, error) {
 //  2. 遍历指定页面（或所有页面），逐页提取内容
 //  3. 返回每页的结构化数据
 func (e *Extractor) ExtractReader(r io.ReadSeeker) (*model.ExtractionResult, error) {
+	// 初始化跨页缓存
+	e.fontCache = make(map[int]font.FontDecoder)
+	e.formCache = make(map[int]*interpret.FormXObject)
+
 	// 使用宽松验证模式，兼容不完全规范的 PDF 文件
 	conf := pdfcpuModel.NewDefaultConfiguration()
 	conf.ValidationMode = pdfcpuModel.ValidationRelaxed
@@ -273,6 +285,15 @@ func (e *Extractor) buildFonts(ctx *pdfcpuModel.Context, resources types.Dict, r
 		if !ok {
 			continue
 		}
+		objNr := indRef.ObjectNumber.Value()
+
+		// 缓存命中：同一字体对象在多个页面/Form 中共享时直接复用解码器，
+		// 避免重复解析 ToUnicode CMap 和嵌入字体程序（这两步开销最大）。
+		if cached, ok := e.fontCache[objNr]; ok && cached != nil {
+			resolver.Register(name, cached)
+			continue
+		}
+
 		// 解引用获取字体字典
 		fd, err := ctx.DereferenceFontDict(indRef)
 		if err != nil {
@@ -286,7 +307,11 @@ func (e *Extractor) buildFonts(ctx *pdfcpuModel.Context, resources types.Dict, r
 
 		// Type0 是复合字体（CID），需要特殊处理
 		if subtype == "Type0" {
-			e.buildCIDFont(ctx, fd, name, resolver)
+			decoder := e.buildCIDFont(ctx, fd)
+			if decoder != nil {
+				e.fontCache[objNr] = decoder
+				resolver.Register(name, decoder)
+			}
 			continue
 		}
 		// 只处理 Type1、TrueType 和 Type3 简单字体
@@ -336,8 +361,9 @@ func (e *Extractor) buildFonts(ctx *pdfcpuModel.Context, resources types.Dict, r
 			}
 		}
 
-		// 创建简单字体解码器并注册
+		// 创建简单字体解码器，缓存并注册
 		decoder := font.NewSimpleFontDecoder(baseFont, cmap, encodingMap, widths, subtype)
+		e.fontCache[objNr] = decoder
 		resolver.Register(name, decoder)
 	}
 }
@@ -496,7 +522,9 @@ func (e *Extractor) extractFontProgramEncoding(ctx *pdfcpuModel.Context, fd type
 //  1. 解析 ToUnicode CMap
 //  2. 从 CIDFont 字典解析 DW（默认宽度）和 W（宽度数组）
 //  3. 如果没有 ToUnicode CMap，尝试从嵌入字体程序中提取字符映射
-func (e *Extractor) buildCIDFont(ctx *pdfcpuModel.Context, type0Dict types.Dict, resName string, resolver *font.FontResolver) {
+//
+// 返回构建好的解码器；若无法构建则返回 nil。
+func (e *Extractor) buildCIDFont(ctx *pdfcpuModel.Context, type0Dict types.Dict) font.FontDecoder {
 	baseFont := ""
 	if s := type0Dict.NameEntry("BaseFont"); s != nil {
 		baseFont = *s
@@ -543,34 +571,28 @@ func (e *Extractor) buildCIDFont(ctx *pdfcpuModel.Context, type0Dict types.Dict,
 
 	// 有 ToUnicode CMap 的情况
 	if cmap != nil {
-		decoder := font.NewCIDFontDecoder(baseFont, cmap, dw, widths)
-		resolver.Register(resName, decoder)
-		return
+		return font.NewCIDFontDecoder(baseFont, cmap, dw, widths)
 	}
 
 	// 没有 ToUnicode CMap：尝试回退方案
 
 	// 回退方案 1：使用预定义编码（如 GBK）
 	if encoding != "" && isSupportedEncoding(encoding) {
-		decoder := font.NewCIDFontDecoderWithEncoding(baseFont, encoding, dw)
-		resolver.Register(resName, decoder)
-		return
+		return font.NewCIDFontDecoderWithEncoding(baseFont, encoding, dw)
 	}
 
 	// 回退方案 2：从嵌入字体程序中提取字符映射
 	// 对于 Identity-H 编码，CID = GID，可以通过 TrueType cmap 反查得到 Unicode
 	fontCmap := e.extractCIDFontProgramCMap(ctx, type0Dict, cidDict)
 	if fontCmap != nil {
-		decoder := font.NewCIDFontDecoder(baseFont, fontCmap, dw, widths)
-		resolver.Register(resName, decoder)
-		return
+		return font.NewCIDFontDecoder(baseFont, fontCmap, dw, widths)
 	}
 
-	// 所有回退都失败，仍然注册一个带 W 宽度信息的解码器（至少宽度准确）
+	// 所有回退都失败，仍然返回一个带 W 宽度信息的解码器（至少宽度准确）
 	if encoding != "" {
-		decoder := font.NewCIDFontDecoderWithEncoding(baseFont, encoding, dw)
-		resolver.Register(resName, decoder)
+		return font.NewCIDFontDecoderWithEncoding(baseFont, encoding, dw)
 	}
+	return nil
 }
 
 // parseCIDWidthArray 解析 CIDFont 字典中的 W 数组，返回 CID → 宽度映射。
@@ -1380,6 +1402,12 @@ func (e *Extractor) resolveFormXObjectsFromDict(
 		if subtype == nil || *subtype != "Form" {
 			continue
 		}
+		// 缓存命中：Form XObject 通常在多页面间共享，直接复用已解析的结构
+		// （内容流解码、字体解析、嵌套 Form 解析都已在上次完成）。
+		if cached, ok := e.formCache[objNr]; ok && cached != nil {
+			result[name] = cached
+			continue
+		}
 		if err := sd.Decode(); err != nil {
 			continue
 		}
@@ -1424,6 +1452,7 @@ func (e *Extractor) resolveFormXObjectsFromDict(
 				form.FormXObjects = nestedForms
 			}
 		}
+		e.formCache[objNr] = form
 		result[name] = form
 	}
 }

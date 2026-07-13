@@ -26,6 +26,7 @@ var (
 	beginbfrangeRx = regexp.MustCompile(`beginbfrange\s*`)
 	endbfrangeRx   = regexp.MustCompile(`endbfrange\s*`)
 	hexPairRx      = regexp.MustCompile(`<([0-9A-Fa-f]+)>`)
+	codespaceRx    = regexp.MustCompile(`begincodespacerange\s*((?:\s*<[0-9A-Fa-f]+>\s*<[0-9A-Fa-f]+>\s*)+)\s*endcodespacerange`)
 )
 
 func ParseCMap(data []byte) (*CMap, error) {
@@ -154,8 +155,7 @@ func parsebfrange(data []byte, cmap *CMap) error {
 	return nil
 }
 func parseCodespace(data []byte, cmap *CMap) {
-	rx := regexp.MustCompile(`begincodespacerange\s*((?:\s*<[0-9A-Fa-f]+>\s*<[0-9A-Fa-f]+>\s*)+)\s*endcodespacerange`)
-	m := rx.FindSubmatch(data)
+	m := codespaceRx.FindSubmatch(data)
 	if m == nil {
 		return
 	}

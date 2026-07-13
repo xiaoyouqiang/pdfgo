@@ -21,8 +21,32 @@ type tocEntry struct {
 // 格式：标题文本 + 3个以上点号 + 页码（可能带尾随点号/空格）
 var tocLineRe = regexp.MustCompile(`^(.{1,150}?)\s*[.。…]{3,} *\d+[.。… \t]*$`)
 
-// headingNumRe 匹配标题开头的编号，用于推断层级。
-var headingNumRe = regexp.MustCompile(`^(\d+(?:\.\d+)*)\s`)
+// headingNumRe 匹配行首的编号（可能多级，如 "5.11.1"）。
+// 仅匹配数字部分，边界的有效性由 validHeadingNum 在代码中判断
+// （RE2 不支持前瞻，且代码层判断可区分 "5.11.1退役条件" 与 "5个样本"）。
+var headingNumRe = regexp.MustCompile(`^(\d+(?:\.\d+)*)`)
+
+// validHeadingNum 判断编号之后是否为有效的标题边界。
+// 有效边界：
+//   - 行尾（rest 为空）
+//   - ASCII 空白（"5.11 系统退役"）
+//   - 多级编号（含点号）紧接中日韩等非 ASCII 字符（"5.11.1退役条件"）
+//
+// 无效（避免误判正文）：
+//   - 单级编号紧接非 ASCII（"5个样本"、"2019年报告"）
+//   - 紧接 ASCII 字母/数字（"5ml"、"3D"）
+func validHeadingNum(num, rest string) bool {
+	if rest == "" {
+		return true
+	}
+	if c := rest[0]; c == ' ' || c == '\t' || c == '\n' || c == '\r' {
+		return true
+	}
+	if strings.Contains(num, ".") && rest[0] >= 0x80 {
+		return true
+	}
+	return false
+}
 
 // 以下正则用于清洗目录行中的多余点号和空格
 var (
@@ -606,9 +630,9 @@ func extractTocEntries(pages []model.Page) []tocEntry {
 					originX = line.Chars[0].Origin.X
 				}
 
-				if nm := headingNumRe.FindStringSubmatch(title); nm != nil {
+				if num := extractHeadingNum(title); num != "" {
 					// Strategy 1: Use heading number pattern
-					dots := strings.Count(nm[1], ".")
+					dots := strings.Count(num, ".")
 					level = dots + 1
 					// Record this indent → level mapping for future reference
 					if _, found := findIndent(originX); !found {
@@ -728,9 +752,13 @@ func matchTocEntryWithTitle(text string, entries []tocEntry) (int, string) {
 }
 
 // extractHeadingNum extracts the section number from heading text (e.g., "6.1" from "6.1 Title").
+// 仅当编号后是有效标题边界时返回编号，否则返回空串。
 func extractHeadingNum(s string) string {
 	m := headingNumRe.FindStringSubmatch(s)
 	if m == nil {
+		return ""
+	}
+	if !validHeadingNum(m[1], s[len(m[0]):]) {
 		return ""
 	}
 	return m[1]
@@ -740,6 +768,9 @@ func extractHeadingNum(s string) string {
 func textAfterNumber(s string) string {
 	m := headingNumRe.FindStringSubmatch(s)
 	if m == nil {
+		return s
+	}
+	if !validHeadingNum(m[1], s[len(m[0]):]) {
 		return s
 	}
 	return strings.TrimSpace(s[len(m[0]):])
