@@ -168,24 +168,96 @@ func detectFromEdges(edges []Edge, chars []model.Char, settings TableSettings) [
 }
 
 // assignText 将字符分配到表格的各个单元格中。
-// 使用字符边界框中心点判断字符属于哪个单元格。
+//
+// 策略（pdfplumber 风格，fragment-level + 最大重叠面积）：
+//  1. 把 chars 聚合成 fragment（同一行、位置相邻的字符），保留片段的整体 bbox
+//  2. 给每个 cell.bbox 加容差向外扩展，与所有 fragment 求交集面积
+//  3. 每个 fragment 归属给重叠面积最大的 cell
+//  4. 同一 cell 内的多个 fragment 按 (yMid, X0) 排序后拼接
+//
+// 相比旧的字符中心点判断，fragment 级判断能吸收字符 bbox 略微越过单元格
+// 边界的情况（典型场景：英文单词排到行尾时尾部字符越界几单位）。
+//
+// 参数 tolerance 是单元格向外扩展的容差（PDF 坐标单位），用于吸收字符
+// bbox 边缘溢出与表格线检测的轻微误差。
 func assignText(tbl *model.Table, chars []model.Char) {
+	if len(chars) == 0 || tbl.Rows == 0 || tbl.Cols == 0 {
+		return
+	}
+
+	frags := groupCharsToFragments(chars)
+	if len(frags) == 0 {
+		return
+	}
+
+	const tolerance = 3.0
+
+	type cellPos struct{ r, c int }
+	fragBest := make([]cellPos, len(frags))
+	fragArea := make([]float64, len(frags))
+	for i := range fragBest {
+		fragBest[i] = cellPos{-1, -1}
+	}
+
+	// 收集所有非空 cell 的 bbox（扩展后）
+	// 每个 fragment 找到与之重叠面积最大的 cell
 	for r := 0; r < tbl.Rows; r++ {
 		for c := 0; c < tbl.Cols; c++ {
-			cell := &tbl.Cells[r][c]
-			if cell.BBox.Empty() {
+			cb := tbl.Cells[r][c].BBox
+			if cb.Empty() {
 				continue
 			}
-			var sb strings.Builder
-			for _, ch := range chars {
-				// 使用字符中心点判断归属
-				mx := (ch.BBox.X0 + ch.BBox.X1) / 2
-				my := (ch.BBox.Y0 + ch.BBox.Y1) / 2
-				if cell.BBox.Contains(model.Point{X: mx, Y: my}) {
-					sb.WriteString(ch.Text)
+			expanded := model.Rect{
+				X0: cb.X0 - tolerance,
+				Y0: cb.Y0 - tolerance,
+				X1: cb.X1 + tolerance,
+				Y1: cb.Y1 + tolerance,
+			}
+			for fi, f := range frags {
+				area := overlapArea(expanded, f.bbox)
+				if area > fragArea[fi] {
+					fragArea[fi] = area
+					fragBest[fi] = cellPos{r, c}
 				}
 			}
-			cell.Text = sb.String()
+		}
+	}
+
+	// 把 fragment 按归属 cell 收集起来
+	type fragWithPos struct {
+		f        fragment
+		baseY, x0 float64
+	}
+	cellFrags := make(map[cellPos][]fragWithPos)
+	for fi, f := range frags {
+		pos := fragBest[fi]
+		if pos.r < 0 {
+			continue
+		}
+		// 用 fragment 第一个字符的 Origin.Y 作为基线（稳定，不受升/降序字符影响）
+		baseY := f.chars[0].Origin.Y
+		cellFrags[pos] = append(cellFrags[pos], fragWithPos{f: f, baseY: baseY, x0: f.bbox.X0})
+	}
+
+	// 每个 cell 内的 fragment 按 (baseY, x0) 排序后拼接为 Text
+	for r := 0; r < tbl.Rows; r++ {
+		for c := 0; c < tbl.Cols; c++ {
+			pos := cellPos{r, c}
+			ws := cellFrags[pos]
+			if len(ws) == 0 {
+				continue
+			}
+			sort.SliceStable(ws, func(i, j int) bool {
+				if math.Abs(ws[i].baseY-ws[j].baseY) > 2 {
+					return ws[i].baseY < ws[j].baseY
+				}
+				return ws[i].x0 < ws[j].x0
+			})
+			var sb strings.Builder
+			for _, w := range ws {
+				sb.WriteString(w.f.text())
+			}
+			tbl.Cells[r][c].Text = sb.String()
 		}
 	}
 }
