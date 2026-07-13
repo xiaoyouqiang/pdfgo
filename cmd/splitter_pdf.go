@@ -18,6 +18,8 @@ import (
 	"github.com/xiaoyouqiang/pdfgo/pkg/debug"
 	"log"
 	"os"
+	"strconv"
+	"strings"
 
 	"github.com/xiaoyouqiang/pdfgo/pkg/pdfextract"
 	"github.com/xiaoyouqiang/pdfgo/pkg/split"
@@ -36,6 +38,7 @@ func main() {
 		limit      int    // 每个分段的最大字符数
 		withFilter bool   // 是否过滤特殊字符
 		filterToc  bool   // 是否过滤 PDF 目录条目（点线引导 + 页码格式）
+		drops      dropFilterValue
 	)
 
 	// 定义命令行参数
@@ -46,6 +49,10 @@ func main() {
 	flag.IntVar(&limit, "limit", defaultLimit, "每个分段的最大字符数")
 	flag.BoolVar(&withFilter, "filter", true, "是否过滤特殊字符")
 	flag.BoolVar(&filterToc, "filter-toc", false, "是否过滤 PDF 目录条目（识别 标题...页码 格式的目录行）")
+	flag.Var(&drops, "drop", `按页码过滤文本行，可重复。格式 PAGES:PATTERNS。
+PAGES: 1 | 1,2,3 | 1-3 | *（所有页）
+PATTERNS: 逗号分隔；前缀 ~ 表示正则
+示例: -drop "1:目录,文件信息"  -drop "*:~^第\d+页$"`)
 	flag.Parse()
 
 	// 校验必填参数
@@ -59,7 +66,7 @@ func main() {
 	fmt.Printf("Extracting PDF: %s\n", inputFile)
 
 	// 调用核心分段函数
-	results, err := SplitPDFDocument(inputFile, imageDir, imagePref, limit, withFilter, filterToc)
+	results, err := SplitPDFDocument(inputFile, imageDir, imagePref, limit, withFilter, filterToc, drops.filters)
 	if err != nil {
 		log.Fatalf("Failed: %v", err)
 	}
@@ -99,11 +106,12 @@ func main() {
 //   - limit: 每个分段的最大字符数
 //   - withFilter: 是否过滤特殊字符
 //   - filterToc: 是否过滤 PDF 目录条目
+//   - lineFilters: 按页码过滤文本行的规则（提取后、转 Markdown 前应用）
 //
 // 返回：
 //   - []split.SplitResult: 分段结果数组
 //   - error: 处理过程中的错误
-func SplitPDFDocument(filePath string, imageDir string, imagePrefix string, limit int, withFilter bool, filterToc bool) ([]split.SplitResult, error) {
+func SplitPDFDocument(filePath string, imageDir string, imagePrefix string, limit int, withFilter bool, filterToc bool, lineFilters []pdfextract.LineFilter) ([]split.SplitResult, error) {
 	// 创建 PDF 提取器，配置提取选项
 	e := pdfextract.NewExtractor(pdfextract.ExtractionOptions{
 		ExtractText:  true,           // 始终提取文本
@@ -117,6 +125,11 @@ func SplitPDFDocument(filePath string, imageDir string, imagePrefix string, limi
 		return nil, fmt.Errorf("failed to extract PDF: %w", err)
 	}
 	pages := result.Pages
+
+	// 应用按页码过滤（在 PagesToMarkdown 之前，与 FilterHeadersFooters 同层）
+	if len(lineFilters) > 0 {
+		pdfextract.ApplyLineFilters(pages, lineFilters)
+	}
 
 	// 如果指定了图片目录，将提取的图片保存到文件
 	if imageDir != "" {
@@ -134,4 +147,84 @@ func SplitPDFDocument(filePath string, imageDir string, imagePrefix string, limi
 	results = split.SplitLargeBlocks(results, 256, 0, false)
 
 	return results, nil
+}
+
+// dropFilterValue 实现 flag.Value 接口，解析 -drop 参数。
+//
+// 格式：PAGES:PATTERNS，可累积多次 -drop。
+//   - PAGES: "*" 表示所有页；"1"、"1,2,3"、"1-3" 表示指定页码
+//   - PATTERNS: 逗号分隔；前缀 "~" 表示正则，否则为子串
+//
+// 示例：
+//
+//	-drop "1:目录,文件信息"
+//	-drop "*:~^第\d+页$"
+//	-drop "1-3:页脚"
+type dropFilterValue struct {
+	filters []pdfextract.LineFilter
+}
+
+func (d *dropFilterValue) String() string { return "" }
+
+func (d *dropFilterValue) Set(s string) error {
+	idx := strings.Index(s, ":")
+	if idx < 0 {
+		return fmt.Errorf("invalid -drop %q: expected PAGES:PATTERNS", s)
+	}
+	pagesStr := strings.TrimSpace(s[:idx])
+	patsStr := s[idx+1:]
+	if pagesStr == "" || patsStr == "" {
+		return fmt.Errorf("invalid -drop %q: PAGES and PATTERNS must not be empty", s)
+	}
+
+	var pages []int
+	if pagesStr != "*" {
+		for _, part := range strings.Split(pagesStr, ",") {
+			part = strings.TrimSpace(part)
+			if part == "" {
+				continue
+			}
+			// 支持 "1-3" 范围
+			if dash := strings.Index(part, "-"); dash > 0 {
+				lo, err1 := strconv.Atoi(part[:dash])
+				hi, err2 := strconv.Atoi(part[dash+1:])
+				if err1 != nil || err2 != nil || lo < 1 || hi < lo {
+					return fmt.Errorf("invalid -drop page range %q", part)
+				}
+				for p := lo; p <= hi; p++ {
+					pages = append(pages, p)
+				}
+			} else {
+				p, err := strconv.Atoi(part)
+				if err != nil || p < 1 {
+					return fmt.Errorf("invalid -drop page number %q", part)
+				}
+				pages = append(pages, p)
+			}
+		}
+	}
+
+	var contains, regex []string
+	for _, pat := range strings.Split(patsStr, ",") {
+		pat = strings.TrimSpace(pat)
+		if pat == "" {
+			continue
+		}
+		if strings.HasPrefix(pat, "~") {
+			regex = append(regex, pat[1:])
+		} else {
+			contains = append(contains, pat)
+		}
+	}
+	if len(contains) == 0 && len(regex) == 0 {
+		return fmt.Errorf("invalid -drop %q: no patterns", s)
+	}
+
+	d.filters = append(d.filters, pdfextract.LineFilter{
+		Pages:    pages,
+		Contains: contains,
+		Regex:    regex,
+		Scope:    pdfextract.FilterLine, // 命令行固定行级；Box 级请使用 Go API
+	})
+	return nil
 }

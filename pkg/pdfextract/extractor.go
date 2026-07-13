@@ -39,10 +39,11 @@ import (
 
 // ExtractionOptions 配置 PDF 提取行为，控制提取哪些类型的内容。
 type ExtractionOptions struct {
-	ExtractText  bool  // 是否提取文本内容
-	ExtractTable bool  // 是否检测和提取表格
-	ExtractImage bool  // 是否提取图片
-	Pages        []int // 指定提取的页码（nil 表示所有页面）
+	ExtractText  bool         // 是否提取文本内容
+	ExtractTable bool         // 是否检测和提取表格
+	ExtractImage bool         // 是否提取图片
+	Pages        []int        // 指定提取的页码（nil 表示所有页面）
+	LineFilters  []LineFilter // 按页码过滤文本行（提取后、转 Markdown 前应用）
 }
 
 // DefaultExtractionOptions 返回默认提取选项（仅提取文本）。
