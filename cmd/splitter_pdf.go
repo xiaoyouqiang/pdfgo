@@ -71,6 +71,23 @@ table: 可选前缀，切换为表格模式（任一单元格命中即删整个 
 
 	fmt.Printf("Extracting PDF: %s\n", inputFile)
 
+	//var lineFilters []pdfextract.LineFilter
+	//lineFilters = append(lineFilters, pdfextract.LineFilter{
+	//	Pages:    []int{1, 2},
+	//	Contains: []string{"文件信息", "Contents"},
+	//})
+	//lineFilters = append(lineFilters, pdfextract.LineFilter{
+	//	Pages: []int{1, 2},
+	//	Regex: []string{`目\s*录`},
+	//})
+	//lineFilters = append(lineFilters, pdfextract.LineFilter{
+	//	Regex: []string{`^\s*\d+/\d+\s*$`},
+	//})
+	//lineFilters = append(lineFilters, pdfextract.LineFilter{
+	//	Regex:  []string{`文\s*件\s*编\s*号`},
+	//	Target: pdfextract.TargetTable,
+	//})
+
 	// 调用核心分段函数
 	results, err := SplitPDFDocument(inputFile, imageDir, imagePref, limit, withFilter, filterToc, drops.filters)
 	if err != nil {
