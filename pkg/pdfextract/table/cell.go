@@ -420,10 +420,31 @@ func splitCellGroupByColumnStructure(cells []model.Cell, indices []int) [][]int 
 	sort.Float64s(validRatios)
 	medianRatio := validRatios[len(validRatios)/2]
 
+	// 计算该组单元格的整体左右边界，用于识别跨整行的合并单元格行
+	groupMinX, groupMaxX := math.MaxFloat64, -math.MaxFloat64
+	for _, idx := range indices {
+		if cells[idx].BBox.X0 < groupMinX {
+			groupMinX = cells[idx].BBox.X0
+		}
+		if cells[idx].BBox.X1 > groupMaxX {
+			groupMaxX = cells[idx].BBox.X1
+		}
+	}
+	groupMinXKey := int(math.Round(groupMinX * q))
+	groupMaxXKey := int(math.Round(groupMaxX * q))
+
 	// 阈值: 重叠率 < 中位数*0.4 且 < 0.5
 	var splitAfter []int // 在第 i 行之后拆分
 	for i, ratio := range overlapRatios {
 		if ratio < medianRatio*0.4 && ratio < 0.5 {
+			// 例外：如果第 i 行是跨整行的合并单元格（只有左右两个 X 边界，
+			// 且与表格左右边界对齐），不拆分。
+			// 典型场景：版本修改记录表的"修改控制"标题行跨全部列，
+			// 与下方多列数据行的 X 边界 Jaccard 自然很低，但语义上属于同一表格。
+			rowXBoundaries := rowXSets[i]
+			if len(rowXBoundaries) <= 2 && rowXBoundaries[groupMinXKey] && rowXBoundaries[groupMaxXKey] {
+				continue
+			}
 			splitAfter = append(splitAfter, i)
 		}
 	}

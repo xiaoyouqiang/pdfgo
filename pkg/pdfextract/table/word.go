@@ -20,6 +20,88 @@ type fragment struct {
 	bbox  model.Rect
 }
 
+// OverlapArea 导出的矩形重叠面积计算接口。
+func OverlapArea(a, b model.Rect) float64 {
+	return overlapArea(a, b)
+}
+// 用于在构建 TextBoxes 之前剔除表格内字符，避免重复输出。
+//
+// 判断规则：用 fragment 视图，每个 fragment 只要其 bbox 与任意 cell bbox
+// （向四周扩展 tolerance 单位）有非零重叠面积，则该 fragment 全部字符都被视为
+// 表格内容而排除。
+//
+// 相比按字符中心点判断，fragment 视图能正确处理"字符越界但语义属表格"的情况：
+// 比如英文单词排到行尾时尾部字符的 bbox 完全越过 cell 边界，但因为与前面的字符
+// 属同一 fragment（位置相邻），而前面字符的 bbox 与 cell 重叠，整个 fragment
+// 都会被排除，避免出现"ity"、"ing"等英文词尾变成孤儿 TextBox。
+//
+// 参数：
+//   - chars: 待过滤的字符切片（不会被修改）
+//   - tables: 已检测到的表格列表
+//   - tolerance: cell bbox 向外扩展的容差（PDF 坐标单位）
+//
+// 返回：被表格消费后剩余的字符切片。
+func ExcludeTableCharsFromText(chars []model.Char, tables []model.Table, tolerance float64) []model.Char {
+	if len(tables) == 0 || len(chars) == 0 {
+		return chars
+	}
+
+	// 收集所有非空 cell 的 bbox（扩展后）
+	var expandedCells []model.Rect
+	for _, t := range tables {
+		for r := 0; r < t.Rows; r++ {
+			for c := 0; c < t.Cols; c++ {
+				cb := t.Cells[r][c].BBox
+				if cb.Empty() {
+					continue
+				}
+				// 仅 X 方向扩展（与 assignText 保持一致）：
+				// Y 方向不扩展保证表格外的标题/段落（Y 与 cell 不重叠）
+				// 不会被误判为表格内容。
+				expandedCells = append(expandedCells, model.Rect{
+					X0: cb.X0 - tolerance,
+					Y0: cb.Y0,
+					X1: cb.X1 + tolerance,
+					Y1: cb.Y1,
+				})
+			}
+		}
+	}
+	if len(expandedCells) == 0 {
+		return chars
+	}
+
+	// 聚合成 fragment
+	frags := groupCharsToFragments(chars)
+
+	// 标记被消费 fragment 的所有 char SeqNo
+	// 归属判断与 assignText 完全一致：只要 fragment 与任意 cell（X 扩展后）
+	// 有非零重叠面积就视为表格内容；Y 方向严格不扩展，表格外文字自然不会命中。
+	consumed := make(map[int]bool, len(frags))
+	for _, f := range frags {
+		excluded := false
+		for _, ec := range expandedCells {
+			if overlapArea(ec, f.bbox) > 0 {
+				excluded = true
+				break
+			}
+		}
+		if excluded {
+			for _, c := range f.chars {
+				consumed[c.SeqNo] = true
+			}
+		}
+	}
+
+	var filtered []model.Char
+	for _, ch := range chars {
+		if !consumed[ch.SeqNo] {
+			filtered = append(filtered, ch)
+		}
+	}
+	return filtered
+}
+
 func (f fragment) text() string {
 	if len(f.chars) == 0 {
 		return ""

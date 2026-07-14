@@ -30,7 +30,6 @@ import (
 	pdfcpuModel "github.com/pdfcpu/pdfcpu/pkg/pdfcpu/model"
 	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/types"
 	"github.com/xiaoyouqiang/pdfgo/pkg/pdfextract/font"
-	"github.com/xiaoyouqiang/pdfgo/pkg/pdfextract/internal/spatial"
 	"github.com/xiaoyouqiang/pdfgo/pkg/pdfextract/interpret"
 	"github.com/xiaoyouqiang/pdfgo/pkg/pdfextract/layout"
 	"github.com/xiaoyouqiang/pdfgo/pkg/pdfextract/model"
@@ -232,7 +231,7 @@ func (e *Extractor) extractPage(ctx *pdfcpuModel.Context, pageNum int) (*model.P
 		chars = e.deduplicateLayerChars(chars)
 		// 如果检测到表格，先排除表格区域内的字符
 		if len(tables) > 0 {
-			chars = excludeTableChars(chars, tables)
+			chars = table.ExcludeTableCharsFromText(chars, tables, 3.0)
 		}
 		// 使用布局分析器将字符组织为文本框
 		textBoxes = e.buildTextBoxes(chars)
@@ -1163,45 +1162,6 @@ func (e *Extractor) dedupLine(chars []model.Char) []model.Char {
 		}
 	}
 	return result
-}
-
-// excludeTableChars 从字符列表中排除落在表格单元格内的字符，
-// 避免表格内容被重复包含在文本框中。
-func excludeTableChars(chars []model.Char, tables []model.Table) []model.Char {
-	// 构建单元格的空间索引
-	idx := spatial.NewIndex[model.Rect]()
-	for i := range tables {
-		for r := 0; r < tables[i].Rows; r++ {
-			for c := 0; c < tables[i].Cols; c++ {
-				bbox := tables[i].Cells[r][c].BBox
-				if !bbox.Empty() {
-					idx.Insert(bbox, bbox)
-				}
-			}
-		}
-	}
-
-	var filtered []model.Char
-	for _, ch := range chars {
-		// 使用字符边界框的中心点判断是否在表格内
-		mx := (ch.BBox.X0 + ch.BBox.X1) / 2
-		my := (ch.BBox.Y0 + ch.BBox.Y1) / 2
-		pt := model.Point{X: mx, Y: my}
-
-		// 使用空间索引快速查找可能包含该点的单元格
-		hits := idx.Query(model.Rect{X0: mx - 1, Y0: my - 1, X1: mx + 1, Y1: my + 1})
-		inTable := false
-		for _, cellBBox := range hits {
-			if cellBBox.Contains(pt) {
-				inTable = true
-				break
-			}
-		}
-		if !inTable {
-			filtered = append(filtered, ch)
-		}
-	}
-	return filtered
 }
 
 // splitTextBoxesOnTables 拆分跨越表格 Y 范围的文本框。

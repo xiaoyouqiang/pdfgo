@@ -190,17 +190,23 @@ func assignText(tbl *model.Table, chars []model.Char) {
 		return
 	}
 
-	const tolerance = 3.0
+	const xTol = 3.0 // 仅 X 方向扩展容差
 
 	type cellPos struct{ r, c int }
 	fragBest := make([]cellPos, len(frags))
-	fragArea := make([]float64, len(frags))
+	fragArea := make([]float64, len(frags)) // 与最佳 cell 的重叠面积
 	for i := range fragBest {
 		fragBest[i] = cellPos{-1, -1}
 	}
 
-	// 收集所有非空 cell 的 bbox（扩展后）
+	// 收集所有非空 cell 的 bbox（仅 X 方向扩展）
 	// 每个 fragment 找到与之重叠面积最大的 cell
+	//
+	// 为什么只扩展 X 不扩展 Y（对齐 pdfplumber）：
+	//   - 英文单词排到行尾时尾部字符 X 方向越界是常见现象，X 扩展能吸收这些字符
+	//   - Y 方向字符基本不越界（行高有富余），扩展 Y 反而会让表格外的标题/段落
+	//     「碰到」cell 边缘导致错误纳入。pdfplumber 不扩展 cell bbox，遵循同样思路
+	//   - Y 不扩展时，表格外文字（Y 与 cell 不重叠）的重叠面积自然为 0，无需任何阈值
 	for r := 0; r < tbl.Rows; r++ {
 		for c := 0; c < tbl.Cols; c++ {
 			cb := tbl.Cells[r][c].BBox
@@ -208,10 +214,10 @@ func assignText(tbl *model.Table, chars []model.Char) {
 				continue
 			}
 			expanded := model.Rect{
-				X0: cb.X0 - tolerance,
-				Y0: cb.Y0 - tolerance,
-				X1: cb.X1 + tolerance,
-				Y1: cb.Y1 + tolerance,
+				X0: cb.X0 - xTol,
+				Y0: cb.Y0,
+				X1: cb.X1 + xTol,
+				Y1: cb.Y1,
 			}
 			for fi, f := range frags {
 				area := overlapArea(expanded, f.bbox)
@@ -222,6 +228,9 @@ func assignText(tbl *model.Table, chars []model.Char) {
 			}
 		}
 	}
+
+	// 无阈值过滤：Y 方向严格保证表格外文字（Y 与 cell 不重叠）的重叠面积自然为 0，
+	// 不会被分配给任何 cell。这是 pdfplumber 的核心简洁性所在。
 
 	// 把 fragment 按归属 cell 收集起来
 	type fragWithPos struct {
