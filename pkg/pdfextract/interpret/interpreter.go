@@ -345,6 +345,15 @@ func (ci *ContentInterpreter) interpretFormXObjectByName(name string) {
 	ci.gStack.Push(ci.gState)
 	savedGState := ci.gState
 
+	// 保存文本状态（PDF 规范要求 Do 操作符保存完整图形状态，包括文本状态）。
+	// Form XObject 内部可能修改字体（Tf）、文本矩阵（Tm）等，如果不恢复，
+	// Form 后续的外层文本操作会使用 Form 内部的字体名，但字体解码器已随
+	// 作用域恢复而不存在，导致 showString 静默丢弃字符。
+	// 典型场景：模板在 Form 调用前设置字体 F1，Form 内部切换到 F7，
+	// Form 返回后外层 footer 的 Tj 操作使用 F7（已不在作用域）→ 字符丢失。
+	savedTState := *ci.tState
+	defer func() { *ci.tState = savedTState }()
+
 	// 保存并设置当前 Form 对象编号（用于标记字符来源）
 	savedFormObjNr := ci.currentFormObjNr
 	ci.currentFormObjNr = form.ObjNr

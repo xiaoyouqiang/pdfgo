@@ -28,10 +28,12 @@ import (
 // defaultLimit 是每个分段的最大字符数，默认 4096 个字符
 const defaultLimit = 4096
 
-// go run cmd/splitter_pdf.go -i "生生AI规划222.pdf"  -image-dir ./images
-// go run cmd/splitter_pdf.go -i "生生AI规划222.pdf" -drop '*:table:文件名称 //在所有页检测 文件名字 关键词，删除命中的表格
-// go run cmd/splitter_pdf.go -i "生生AI规划222.pdf" -drop '*:table:文件名称 //在所有页检测 文件名字 关键词，删除命中的表格
-// go run cmd/splitter_pdf.go -i "生生AI规划222.pdf" "1,2:目录,文件信息,Contents" -drop '1,2:~目\s*录' //在第一页和第二页 检测 目录,文件信息,Contents，命中的行删除，命中 ~目\s*录 的删除
+// go run cmd/splitter_pdf.go -i "demo.pdf" -image-dir ./images
+// go run cmd/splitter_pdf.go -i "demo.pdf" -drop '*:table:文件名称 //在所有页检测 文件名字 关键词，删除命中的表格
+// go run cmd/splitter_pdf.go -i "demo.pdf" -drop '*:table:文件名称 //在所有页检测 文件名字 关键词，删除命中的表格
+// go run cmd/splitter_pdf.go -i "demo.pdf" -drop "1,2:目录,文件信息,Contents" -drop '1,2:~目\s*录' //在第一页和第二页 检测 目录,文件信息,Contents，命中的行删除，命中 ~目\s*录 的删除
+// go run cmd/splitter_pdf.go -i "demo.pdf" -drop '*:table:~文\s*件\s*编\s*号,~版\s*本\s*号' //在所有页匹配内容，过滤掉表格
+
 func main() {
 	var (
 		inputFile  string // 输入 PDF 文件路径
