@@ -207,6 +207,11 @@ func assignText(tbl *model.Table, chars []model.Char) {
 	//   - Y 方向字符基本不越界（行高有富余），扩展 Y 反而会让表格外的标题/段落
 	//     「碰到」cell 边缘导致错误纳入。pdfplumber 不扩展 cell bbox，遵循同样思路
 	//   - Y 不扩展时，表格外文字（Y 与 cell 不重叠）的重叠面积自然为 0，无需任何阈值
+	//
+	// Tie-breaking（对齐 pdfplumber 的半开区间 [x0,x1) × [top,bottom)）：
+	//   当 fragment 与多个 cell 的重叠面积完全相等（极端边界，fragment 跨越共享边），
+	//   用 fragment 中心点 + 半开区间决定归属。pdfplumber 在 table.py:426-432 用同样
+	//   的半开区间：左/上闭 (>=)、右/下开 (<)，使边界字符自然归到右/下 cell。
 	for r := 0; r < tbl.Rows; r++ {
 		for c := 0; c < tbl.Cols; c++ {
 			cb := tbl.Cells[r][c].BBox
@@ -224,6 +229,13 @@ func assignText(tbl *model.Table, chars []model.Char) {
 				if area > fragArea[fi] {
 					fragArea[fi] = area
 					fragBest[fi] = cellPos{r, c}
+				} else if area > 0 && area == fragArea[fi] {
+					// 面积相等：用 fragment 中心点 + 半开区间决定归属（右/下边界优先）
+					midX := (f.bbox.X0 + f.bbox.X1) / 2
+					midY := (f.bbox.Y0 + f.bbox.Y1) / 2
+					if midX >= cb.X0 && midX < cb.X1 && midY >= cb.Y0 && midY < cb.Y1 {
+						fragBest[fi] = cellPos{r, c}
+					}
 				}
 			}
 		}
