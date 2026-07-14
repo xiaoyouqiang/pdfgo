@@ -15,7 +15,6 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"github.com/xiaoyouqiang/pdfgo/pkg/debug"
 	"log"
 	"os"
 	"strconv"
@@ -144,7 +143,6 @@ func SplitPDFDocument(filePath string, imageDir string, imagePrefix string, limi
 			return nil, fmt.Errorf("failed to save images: %w", err)
 		}
 	}
-	debug.VarDump(result.Title)
 	// 将所有页面转换为 Markdown 格式（包含标题级别检测、表格渲染等）
 	markdown := pdfextract.PagesToMarkdown(pages)
 
