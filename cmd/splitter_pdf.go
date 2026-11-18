@@ -154,6 +154,10 @@ func SplitPDFDocument(filePath string, imageDir string, imagePrefix string, limi
 		pdfextract.ApplyLineFilters(pages, lineFilters)
 	}
 
+	// 剔除跨页重复图片（水印、页眉 logo）：≥3 页字节级相同即判定为装饰图，
+	// 须在 SaveImages/PagesToMarkdown 之前执行（对齐 ss-ai 1649f54 接入方式）
+	pdfextract.FilterRepeatedImages(pages, 3)
+
 	// 如果指定了图片目录，将提取的图片保存到文件
 	if imageDir != "" {
 		if err := pdfextract.SaveImages(pages, imageDir, imagePrefix); err != nil {

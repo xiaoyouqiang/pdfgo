@@ -1,6 +1,7 @@
 package pdfextract
 
 import (
+	"crypto/sha1"
 	"regexp"
 	"strings"
 
@@ -194,4 +195,50 @@ func matchText(text string, cf *compiledFilter) bool {
 		}
 	}
 	return false
+}
+
+// FilterRepeatedImages 剔除跨页重复的图片（水印、页眉 logo 等逐页重复的装饰图）。
+// 按图片内容 sha1 统计出现的不同页数（同页重复多次只算 1 页），
+// 出现页数 >= minPages 的图片全部剔除。minPages<=1 或总页数不足 minPages 时跳过。
+// 返回剔除的图片张数。
+func FilterRepeatedImages(pages []model.Page, minPages int) int {
+	if minPages <= 1 || len(pages) < minPages {
+		return 0
+	}
+
+	// 第一遍：统计每个内容 hash 出现的不同页数
+	counts := make(map[[sha1.Size]byte]int)
+	for pi := range pages {
+		var seen map[[sha1.Size]byte]struct{}
+		for _, img := range pages[pi].Images {
+			if len(img.Data) == 0 {
+				continue
+			}
+			key := sha1.Sum(img.Data)
+			if seen == nil {
+				seen = make(map[[sha1.Size]byte]struct{}, len(pages[pi].Images))
+			}
+			if _, dup := seen[key]; dup {
+				continue
+			}
+			seen[key] = struct{}{}
+			counts[key]++
+		}
+	}
+
+	// 第二遍：剔除出现页数达标的图片
+	removed := 0
+	for pi := range pages {
+		imgs := pages[pi].Images
+		kept := make([]model.ImageInfo, 0, len(imgs))
+		for _, img := range imgs {
+			if len(img.Data) > 0 && counts[sha1.Sum(img.Data)] >= minPages {
+				removed++
+				continue
+			}
+			kept = append(kept, img)
+		}
+		pages[pi].Images = kept
+	}
+	return removed
 }

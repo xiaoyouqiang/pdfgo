@@ -55,6 +55,44 @@ func NewSplitModel(patterns []*regexp.Regexp, withFilter bool, filterToc bool, l
 	}
 }
 
+// ClearSplitResult 清理分块结果
+func (m *SplitModel) ClearSplitResult(results []SplitResult) []SplitResult {
+	//过滤 title,content 中的 图片，数字，特殊符号，换行符等
+	//清理 有title，没有content
+	//清理 title和content 都没有的
+	//清理 title或content = "目录"
+	var resultsNew []SplitResult
+	// 链接和图片：匹配 [text](url) 和 ![alt](url)
+	linkRegex := regexp.MustCompile(`!?\[([^\]]*)\]\(([^\)]+)\)`)
+
+	for _, item := range results {
+		title := CleanHTML(item.Title)
+		content := CleanHTML(item.Content)
+		title = string(linkRegex.ReplaceAll([]byte(title), []byte("")))
+		content = string(linkRegex.ReplaceAll([]byte(content), []byte("")))
+		if title == "" && content == "" {
+			continue
+		}
+		if title != "" && content == "" {
+			//title-only 块：≥10字的标题视为正文保留（docx 误用标题样式的整句正文不再丢弃），
+			//句子转入 Content，Title 仍走 MakePathTrunk 的 ParentChain 重建
+			if utf8.RuneCountInString(title) < 10 {
+				continue
+			}
+			item.Content = item.Title
+		}
+
+		title = CleanText(title)
+		content = CleanText(content)
+		if content != "" && IsNumber(content) {
+			continue
+		}
+		resultsNew = append(resultsNew, item)
+	}
+
+	return resultsNew
+}
+
 // Parse parses the markdown text and returns split paragraphs
 func (m *SplitModel) Parse(text string) []SplitResult {
 	// Normalize line endings
@@ -148,6 +186,11 @@ func (m *SplitModel) parseLines(lines []string, baseLevel int) []*TreeNode {
 
 			if len(contentLines) > 0 {
 				content := strings.TrimSpace(strings.Join(contentLines, "\n"))
+				// 切段前先按行剥除 PDF 风格目录行：若先按 limit 硬切，边界目录行
+				// 会被切成「无页码半行 + 孤页码」两类残片，均不再命中
+				// pdfTocLineRe 而漏进切分结果；treeToParagraphs 里的二次剥除
+				// 保留兜底段落级形态。filterToc=false 时本调用为透传。
+				content = m.stripTocLines(content)
 				if content != "" {
 					// Split long content
 					blocks := m.smartSplitParagraph(content, m.limit)
@@ -394,11 +437,13 @@ func (m *SplitModel) treeToParagraphs(nodes []*TreeNode) []SplitResult {
 				// If title has no children (empty content), output title as content so it's not lost
 				if len(node.Children) == 0 {
 					if titleContent != "" {
-						titleStr := strings.Join(chain, " ")
+						//titleStr := strings.Join(chain, " ")
 						level := len(chain)
 						result = append(result, SplitResult{
-							Title:       titleStr,
-							Content:     titleContent,
+							Title:   titleContent,
+							Content: "",
+							//Title:       titleStr,
+							//Content:     titleContent,
 							ParentChain: chain,
 							Level:       level,
 							OriginLevel: node.Level,
@@ -474,6 +519,43 @@ func (m *SplitModel) treeToParagraphs(nodes []*TreeNode) []SplitResult {
 	}
 
 	return filtered
+}
+
+// MakePathTrunk 按 ParentChain 顺序重建层级标题：链上第 i 个标题用 i+2 个 #
+// （第一个 ##、第二个 ###……# 留给 docTitle），层级标题之间换行分隔；
+// docTitle 未包含在标题中时前置为 "# docTitle" 一级。
+// content 拼接（title+"\n"+content+" "）与空块过滤语义与原 makePathTrunk 保持一致。
+func MakePathTrunk(docTitle string, trunks []SplitResult) []SplitResult {
+	var newTrunks []SplitResult
+	for _, item := range trunks {
+		//重建title
+		var title string
+		for i, chain := range item.ParentChain {
+			title = title + strings.Repeat("#", i+2) + " " + strings.TrimSpace(chain) + " / "
+		}
+		title = strings.TrimSuffix(title, "\n")
+		item.Title = title
+		//不重复拼接 title 可能已经包含了 docTitle
+		if title != "" && docTitle != "" && !strings.Contains(title, docTitle) {
+			title = "# " + strings.TrimSpace(docTitle) + " / " + title
+			item.Title = title
+		}
+		content := strings.TrimSpace(item.Content)
+
+		if content == "" {
+			content = title
+		}
+		//内容仅为文档标题本身的块（根级 H1 title-only 保留产物）丢弃：docTitle 已在各块 Title 首行
+		if docTitle != "" && content == strings.TrimSpace(docTitle) {
+			continue
+		}
+		if content != "" && title != content {
+			item.Content = title + "\n" + content + " "
+		}
+		newTrunks = append(newTrunks, item)
+	}
+
+	return newTrunks
 }
 
 // filterTitleSpecialChars removes special characters from title

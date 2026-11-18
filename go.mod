@@ -7,6 +7,7 @@ require (
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc
 	github.com/google/uuid v1.6.0
 	github.com/pdfcpu/pdfcpu v0.11.1
+	golang.org/x/net v0.45.0
 	golang.org/x/text v0.30.0
 )
 

@@ -79,9 +79,10 @@ func main() {
 	fmt.Printf("Split into %d segments (before secondary split)\n", len(results))
 
 	// Apply secondary splitting for large blocks (preserve tables and links)
+	// SplitLargeBlocks 第三参数现为 tableSplitThreshold（0=默认取 chunkSize），
+	// overlap 已内化为 chunkSize/5 派生（对齐 ss-ai 3a93acb/84f2144）
 	secondaryChunkSize := 256 // Smaller chunk size for secondary splitting
-	secondaryOverlap := 12    // Overlap for context
-	results = split.SplitLargeBlocks(results, secondaryChunkSize, secondaryOverlap, false)
+	results = split.SplitLargeBlocks(results, secondaryChunkSize, 0, false)
 
 	fmt.Printf("Split into %d segments (after secondary split)\n", len(results))
 

@@ -313,3 +313,99 @@ func TestApplyLineFilters_TableNoHitKeepsAll(t *testing.T) {
 		t.Errorf("no hit should keep all tables: got %d", len(pages[0].Tables))
 	}
 }
+// helper：构造图片
+func makeImage(data string, w, h int) model.ImageInfo {
+	return model.ImageInfo{Data: []byte(data), Width: w, Height: h, Format: "png"}
+}
+
+func TestFilterRepeatedImages_DropsCrossPageDuplicates(t *testing.T) {
+	watermark := makeImage("watermark-bytes", 80, 20)
+	pages := []model.Page{
+		{PageNum: 1, Images: []model.ImageInfo{watermark, makeImage("fig-1", 400, 300)}},
+		{PageNum: 2, Images: []model.ImageInfo{watermark, makeImage("fig-2", 400, 300)}},
+		{PageNum: 3, Images: []model.ImageInfo{watermark, makeImage("fig-3", 400, 300)}},
+	}
+	if got := FilterRepeatedImages(pages, 3); got != 3 {
+		t.Fatalf("removed = %d, want 3", got)
+	}
+	for pi, page := range pages {
+		if len(page.Images) != 1 || string(page.Images[0].Data) == "watermark-bytes" {
+			t.Errorf("page %d: watermark should be dropped, figure kept; got %d images", pi+1, len(page.Images))
+		}
+	}
+}
+
+func TestFilterRepeatedImages_TooFewPagesKeeps(t *testing.T) {
+	shared := makeImage("same", 80, 20)
+	pages := []model.Page{
+		{PageNum: 1, Images: []model.ImageInfo{shared}},
+		{PageNum: 2, Images: []model.ImageInfo{shared}},
+	}
+	if got := FilterRepeatedImages(pages, 3); got != 0 {
+		t.Fatalf("removed = %d, want 0 (page count below minPages)", got)
+	}
+	if len(pages[0].Images) != 1 || len(pages[1].Images) != 1 {
+		t.Errorf("images should be kept")
+	}
+}
+
+func TestFilterRepeatedImages_SamePageDuplicatesKept(t *testing.T) {
+	shared := makeImage("same-page", 80, 20)
+	pages := []model.Page{
+		{PageNum: 1, Images: []model.ImageInfo{shared, shared}},
+		{PageNum: 2, Images: []model.ImageInfo{makeImage("other", 10, 10)}},
+	}
+	if got := FilterRepeatedImages(pages, 3); got != 0 {
+		t.Fatalf("removed = %d, want 0 (same-page repeats count once)", got)
+	}
+	if len(pages[0].Images) != 2 {
+		t.Errorf("same-page duplicates should be kept, got %d", len(pages[0].Images))
+	}
+}
+
+func TestFilterRepeatedImages_MinPagesDisabled(t *testing.T) {
+	shared := makeImage("same", 80, 20)
+	pages := []model.Page{
+		{PageNum: 1, Images: []model.ImageInfo{shared}},
+		{PageNum: 2, Images: []model.ImageInfo{shared}},
+		{PageNum: 3, Images: []model.ImageInfo{shared}},
+	}
+	for _, mp := range []int{0, 1, -5} {
+		if got := FilterRepeatedImages(pages, mp); got != 0 {
+			t.Fatalf("minPages=%d: removed = %d, want 0", mp, got)
+		}
+	}
+	if len(pages[0].Images) != 1 {
+		t.Errorf("images should be kept when disabled")
+	}
+}
+
+func TestFilterRepeatedImages_EmptyDataIgnored(t *testing.T) {
+	pages := []model.Page{
+		{PageNum: 1, Images: []model.ImageInfo{{Data: nil}, {Data: []byte{}}}},
+		{PageNum: 2, Images: []model.ImageInfo{{Data: nil}}},
+		{PageNum: 3, Images: []model.ImageInfo{{Data: []byte{}}}},
+	}
+	if got := FilterRepeatedImages(pages, 3); got != 0 {
+		t.Fatalf("removed = %d, want 0 (empty data never counted)", got)
+	}
+	if len(pages[0].Images) != 2 {
+		t.Errorf("empty-data images should be kept, got %d", len(pages[0].Images))
+	}
+}
+
+func TestFilterRepeatedImages_DropsSavedOnes(t *testing.T) {
+	img := makeImage("logo", 80, 20)
+	img.SavedFilename = "logo123.png"
+	pages := []model.Page{
+		{PageNum: 1, Images: []model.ImageInfo{img}},
+		{PageNum: 2, Images: []model.ImageInfo{img}},
+		{PageNum: 3, Images: []model.ImageInfo{img}},
+	}
+	if got := FilterRepeatedImages(pages, 3); got != 3 {
+		t.Fatalf("removed = %d, want 3 (SavedFilename irrelevant)", got)
+	}
+	if len(pages[0].Images) != 0 {
+		t.Errorf("saved repeated image should be dropped too")
+	}
+}

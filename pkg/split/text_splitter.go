@@ -21,15 +21,15 @@ import (
 //
 // 重叠（Overlap）机制：
 //
-//	相邻块之间共享 chunkOverlap 个字符的上下文，避免跨块语义断裂。
-//	例如 chunkSize=1000, chunkOverlap=200 时：
-//	  块1: 字符 [0, 1000)
-//	  块2: 字符 [800, 1800)   ← 前 200 字符与块1 末尾重叠
-//	  块3: 字符 [1600, 2600)  ← 前 200 字符与块2 末尾重叠
+//	重叠带语义边界门槛：仅当块尾 chunkOverlap 窗口内存在语义边界
+//	（段落 > 换行 > 句末标点）时，取边界之后的尾巴作为下一块的重叠前缀，
+//	重叠起点必落在句子/段落边界之后；找不到语义边界则不产生重叠。
+//	内容不超过 chunkSize 的块不会被切分，自然无重叠。
 type MarkdownPreservingSplitter struct {
-	chunkSize    int      // 每个块的最大字符数（rune 计数）
-	chunkOverlap int      // 相邻块之间的重叠字符数（rune 计数），不超过 chunkSize/2
-	separators   []string // 切分分隔符列表，按优先级从高到低排序
+	chunkSize           int      // 每个块的最大字符数（rune 计数）
+	chunkOverlap        int      // 相邻块之间的重叠字符数上限（rune 计数），不超过 chunkSize/2
+	tableSplitThreshold int      // 表格原子保护单元的最大容忍字符数（rune 计数），超过则预切为多张带表头子表；0 值回退为 chunkSize
+	separators          []string // 切分分隔符列表，按优先级从高到低排序
 }
 
 // NewMarkdownPreservingSplitter 创建一个保护 Markdown 结构的文本切分器。
@@ -52,25 +52,36 @@ func NewMarkdownPreservingSplitter(chunkSize, chunkOverlap int) *MarkdownPreserv
 	}
 
 	return &MarkdownPreservingSplitter{
-		chunkSize:    chunkSize,
-		chunkOverlap: chunkOverlap,
+		chunkSize:           chunkSize,
+		chunkOverlap:        chunkOverlap,
+		tableSplitThreshold: chunkSize, // 默认与块大小一致：任何原子保护单元都不应超过块大小
 		// 分隔符按优先级排序，优先在自然断句处切分
 		separators: []string{
 			"\n\n", // 段落分隔（最优先，语义最完整）
 			"\n",   // 换行符
 			"。",    // 中文句号
-			". ",   // 英文句号加空格
 			"！",    // 中文感叹号
-			"！ ",   // 中文感叹号加空格
+			"！",    // 中文感叹号加空格
 			"？",    // 中文问号
-			"？ ",   // 中文问号加空格
-			"; ",   // 英文分号加空格
+			"？",    // 中文问号加空格
+			";",    // 英文分号加空格
 			"；",    // 中文分号
+			".",    // 英文句号加空格
 			//", ",   // 英文逗号（粒度太细，暂不启用）
 			//"，",   // 中文逗号（粒度太细，暂不启用）
 			" ", // 空格（最后选择，保证至少能切分）
 		},
 	}
+}
+
+// SetTableSplitThreshold 设置表格原子保护单元的最大容忍字符数（rune 计数）：
+// 超过该值的表格会在保护阶段按数据行预切为多张完整子表（每张保留表头+分隔行）。
+// n ≤ 0 时回退为默认值 chunkSize。
+func (s *MarkdownPreservingSplitter) SetTableSplitThreshold(n int) {
+	if n <= 0 {
+		n = s.chunkSize
+	}
+	s.tableSplitThreshold = n
 }
 
 // SplitText 切分文本，同时保护 Markdown 表格和链接不被截断。
@@ -92,13 +103,69 @@ func (s *MarkdownPreservingSplitter) SplitText(text string) ([]string, error) {
 	// 保护阶段：将表格和链接替换为短占位符，防止切分时被截断
 	protected, tableMap, linkMap := s.protectMarkdown(text)
 
-	// 切分阶段：对保护后的文本按分隔符优先级进行切分
-	chunks := s.splitProtectedText(protected, originalLen)
+	// 切分阶段
+	var chunks []string
+	if utf8.RuneCountInString(protected) <= s.chunkSize {
+		// 保护后不超限但原文超限：超限部分都在占位符里（表格为主的内容），
+		// 按分隔符切分永远不会触发。走按行有效长度装箱的兜底路径，在占位符
+		// 边界处分开，恢复后每个块的真实长度尽量 ≤ chunkSize。
+		chunks = s.packProtectedLines(protected, tableMap, linkMap)
+	} else {
+		chunks = s.splitProtectedText(protected, originalLen)
+	}
 
 	// 恢复阶段：将占位符替换回原始的表格和链接内容
 	chunks = s.restoreMarkdown(chunks, tableMap, linkMap)
 
 	return chunks, nil
+}
+
+// packProtectedLines 处理「原文超过 chunkSize 但占位符保护后不超限」的文本。
+//
+// 表格等重型内容被替换成短占位符后，按分隔符切分的路径感知不到超限。
+// 这里按行贪心装箱：行是原子单位（不切进行内、占位符不可破坏），
+// 行长按有效长度计——占位符按其恢复后的字符数计——
+// 使恢复后每个块的真实长度尽量 ≤ chunkSize。单行有效长度超限时独立成块。
+func (s *MarkdownPreservingSplitter) packProtectedLines(protected string, tableMap, linkMap map[string]string) []string {
+	// 单行有效长度：自身 rune 数 + 行内占位符恢复后多出的部分
+	lineEffective := func(line string) int {
+		n := utf8.RuneCountInString(line)
+		lineRunes := []rune(line)
+		for _, rng := range s.findPlaceholderRanges(line) {
+			ph := string(lineRunes[rng[0]:rng[1]])
+			if restored, ok := tableMap[ph]; ok {
+				n += utf8.RuneCountInString(restored) - (rng[1] - rng[0])
+			} else if restored, ok := linkMap[ph]; ok {
+				n += utf8.RuneCountInString(restored) - (rng[1] - rng[0])
+			}
+		}
+		return n
+	}
+
+	var chunks []string
+	var cur []string
+	curLen := 0
+	flush := func() {
+		chunk := strings.TrimSpace(strings.Join(cur, "\n"))
+		if chunk != "" {
+			chunks = append(chunks, chunk)
+		}
+		cur = nil
+		curLen = 0
+	}
+	for _, line := range strings.Split(protected, "\n") {
+		eff := lineEffective(line)
+		if curLen > 0 && curLen+1+eff > s.chunkSize {
+			flush()
+		}
+		if curLen > 0 {
+			curLen++ // 行间换行
+		}
+		cur = append(cur, line)
+		curLen += eff
+	}
+	flush()
+	return chunks
 }
 
 // protectMarkdown 将 Markdown 表格和链接提取并替换为占位符，防止切分时被截断。
@@ -119,11 +186,27 @@ func (s *MarkdownPreservingSplitter) protectMarkdown(text string) (string, map[s
 
 	// 保护表格：匹配完整的 Markdown 表格结构
 	// 格式：| col1 | col2 | \n | --- | --- | \n | data | data |
+	// 超过 tableSplitThreshold 的表格先按数据行预切为多张完整子表（每张保留表头+分隔行），
+	// 每张子表各占一个占位符——保证不产生超过阈值的原子保护单元。
 	tableRegex := regexp.MustCompile(`(\|[^\n]+\|\n\|[-| ]+\|\n(?:\|[^\n]+\|\n?)+)`)
 	text = tableRegex.ReplaceAllStringFunc(text, func(match string) string {
-		placeholder := fmt.Sprintf("<<TABLE_%d>>", len(tableMap))
-		tableMap[placeholder] = match
-		return placeholder
+		fragments := s.splitOversizedTable(match)
+		if fragments == nil {
+			placeholder := fmt.Sprintf("<<TABLE_%d>>", len(tableMap))
+			tableMap[placeholder] = match
+			return placeholder
+		}
+		placeholders := make([]string, 0, len(fragments))
+		for _, frag := range fragments {
+			placeholder := fmt.Sprintf("<<TABLE_%d>>", len(tableMap))
+			tableMap[placeholder] = frag
+			placeholders = append(placeholders, placeholder)
+		}
+		out := strings.Join(placeholders, "\n")
+		if strings.HasSuffix(match, "\n") {
+			out += "\n"
+		}
+		return out
 	})
 
 	// 保护链接和图片：匹配 [text](url) 和 ![alt](url)
@@ -135,6 +218,54 @@ func (s *MarkdownPreservingSplitter) protectMarkdown(text string) (string, map[s
 	})
 
 	return text, tableMap, linkMap
+}
+
+// splitOversizedTable 将超过 tableSplitThreshold 的表格按数据行边界预切为多张完整子表。
+//
+// 规则：
+//   - 表格 ≤ 阈值 → 返回 nil（不切，走整表保护）
+//   - 行数 < 3（表头/分隔行不全的畸形表）→ 返回 nil（无法识别表结构，保持原样）
+//   - 每张子表 = 表头行 + 分隔行 + 若干数据行，≤ 阈值（贪心装箱）
+//   - 单个数据行自身超预算 → 整行独占一片，不切断行（仍带表头）
+//   - 表头块自身超预算 → 每片仍拼表头（"尽量有表头"，片可能超阈值）
+func (s *MarkdownPreservingSplitter) splitOversizedTable(table string) []string {
+	if utf8.RuneCountInString(table) <= s.tableSplitThreshold {
+		return nil
+	}
+	lines := strings.Split(strings.TrimSuffix(table, "\n"), "\n")
+	if len(lines) < 3 {
+		return nil
+	}
+	headerBlock := lines[0] + "\n" + lines[1] + "\n"
+	budget := s.tableSplitThreshold - utf8.RuneCountInString(headerBlock)
+	if budget <= 0 {
+		// 表头块自身达到阈值：无法在阈值内装下任何数据行，按每片一行处理（仍尽量带表头）
+		budget = 1
+	}
+	var fragments []string
+	var cur []string // 当前片的缓冲（不含 headerBlock）
+	curLen := 0
+	flush := func() {
+		if len(cur) == 0 {
+			return
+		}
+		fragments = append(fragments, strings.TrimSuffix(headerBlock+strings.Join(cur, "\n"), "\n"))
+		cur = nil
+		curLen = 0
+	}
+	for _, row := range lines[2:] {
+		rowLen := utf8.RuneCountInString(row)
+		if curLen > 0 && curLen+1+rowLen > budget {
+			flush()
+		}
+		if len(cur) > 0 {
+			curLen++ // 行间换行分隔符
+		}
+		cur = append(cur, row)
+		curLen += rowLen
+	}
+	flush()
+	return fragments
 }
 
 // restoreMarkdown 将占位符恢复为原始的 Markdown 表格和链接内容。
@@ -160,16 +291,17 @@ func (s *MarkdownPreservingSplitter) restoreMarkdown(chunks []string, tableMap, 
 // 使用 originalLen（保护前的原始文本长度）来估算最少需要切分的块数，
 // 因为保护后的文本中占位符比原始内容短，不能直接用保护后文本长度计算。
 //
-// 重叠机制：
+// 重叠机制（语义边界门槛）：
 //
-//	每个块切出后，下一个块从当前块末尾 chunkOverlap 个字符处开始，
-//	使相邻块之间有上下文重叠，避免跨块语义断裂。
-//	重叠区域会自动避开占位符边界（不会在占位符中间开始）。
+//	每块切出后，仅当块尾 chunkOverlap 窗口内存在语义边界（段落 > 换行 >
+//	句末标点）时，下一块 = 边界之后的重叠尾巴 + 剩余文本；找不到语义
+//	边界则下一块直接从剩余文本开始（零重叠）。
+//	重叠起点因此必在句子/段落边界之后，不会落在句子中间。
 //
 // 切分策略：
 //  1. 计算最少需要的块数（ceil(原始长度 / (chunkSize - chunkOverlap))）
 //  2. 循环调用 findChunk 找到每个切分点
-//  3. 应用重叠：下一块 = 当前块末尾 overlap 个字符 + 剩余文本
+//  3. 应用重叠：仅当块尾存在语义边界时叠加重叠前缀
 //  4. 如果 findChunk 返回空（极端情况），回退到固定长度切分
 //  5. 剩余内容作为最后一个块
 func (s *MarkdownPreservingSplitter) splitProtectedText(text string, originalLen int) []string {
@@ -208,12 +340,10 @@ func (s *MarkdownPreservingSplitter) splitProtectedText(text string, originalLen
 
 		chunks = append(chunks, chunk)
 
-		// 应用重叠逻辑：下一块从当前块末尾 overlap 个字符处开始
+		// 应用重叠逻辑：仅当块尾窗口存在语义边界时，取边界之后的尾巴作为
+		// 下一块的重叠前缀；找不到语义边界则零重叠（remaining = rest）。
 		if s.chunkOverlap > 0 && rest != "" {
-			chunkRunes := []rune(chunk)
-			// 只有当块长度大于 overlap 时才应用重叠，否则会退化为无进展
-			if len(chunkRunes) > s.chunkOverlap {
-				overlapText := s.extractOverlap(chunk)
+			if overlapText := s.semanticOverlap(chunk); overlapText != "" {
 				remaining = overlapText + rest
 			} else {
 				remaining = rest
@@ -236,30 +366,100 @@ func (s *MarkdownPreservingSplitter) splitProtectedText(text string, originalLen
 	return chunks
 }
 
-// extractOverlap 从块的末尾提取 chunkOverlap 个字符作为下一块的重叠前缀。
-// 会自动调整起始位置，确保不在占位符（<<TABLE_N>> 或 <<LINK_N>>）内部截断：
-// 如果截取起点落在占位符内部，向前移动到该占位符的起始位置。
-func (s *MarkdownPreservingSplitter) extractOverlap(chunk string) string {
+// semanticOverlapLookbehind 是重叠窗口额外回看的 rune 数，保证被窗口起点
+// 截断的分隔符仍然可见（最长候选分隔符 "\n\n" 为 2 rune，取 4 留余量）。
+const semanticOverlapLookbehind = 4
+
+// semanticOverlap 在块的尾部窗口内寻找语义边界，返回边界分隔符之后的尾巴
+// 作为下一块的重叠前缀；找不到语义边界时返回空串（本块与下一块之间零重叠）。
+//
+// 边界规则（移植自 WeKnora chunker computeOverlap 的语义门槛）：
+//   - 优先级：段落分隔 "\n\n" > 换行 "\n" > 句末 "。！？" 或 ". " "! " "? "
+//   - 优先级相同时取窗口内最早出现的边界，重叠尽量大
+//   - 分隔符不得落在 <<TABLE_N>>/<<LINK_N>> 占位符内部
+//   - 边界之后（窗口范围内）必须还有非空白内容，否则不产生重叠
+//   - 重叠长度不超过 chunkOverlap（边界末尾必须落在最后 chunkOverlap 个 rune 内）
+func (s *MarkdownPreservingSplitter) semanticOverlap(chunk string) string {
 	chunkRunes := []rune(chunk)
-	overlapStart := len(chunkRunes) - s.chunkOverlap
-	if overlapStart <= 0 {
-		return chunk
+	maxOverlap := s.chunkOverlap
+	if maxOverlap > len(chunkRunes) {
+		maxOverlap = len(chunkRunes)
+	}
+	if maxOverlap <= 0 {
+		return ""
 	}
 
-	// 检查 overlapStart 是否落在占位符内部，如果是则向前调整到占位符起点
-	placeholderRanges := s.findPlaceholderRanges(chunk)
-	for _, r := range placeholderRanges {
-		if overlapStart > r[0] && overlapStart < r[1] {
-			overlapStart = r[0]
-			break
+	windowLen := maxOverlap + semanticOverlapLookbehind
+	if windowLen > len(chunkRunes) {
+		windowLen = len(chunkRunes)
+	}
+	runes := chunkRunes[len(chunkRunes)-windowLen:]
+	minEnd := windowLen - maxOverlap // 边界分隔符的末尾必须落在最后 maxOverlap 个 rune 内
+	placeholderRanges := s.findPlaceholderRanges(string(runes))
+
+	type boundary struct {
+		start, end, priority int
+	}
+	var best boundary
+	found := false
+	consider := func(start, end, priority int) {
+		if start < 0 || end <= start || end < minEnd || end > len(runes) {
+			return
+		}
+		// 分隔符不得切开占位符
+		if isPositionInPlaceholder(start, placeholderRanges) ||
+			isPositionInPlaceholder(end-1, placeholderRanges) {
+			return
+		}
+		// 边界之后必须还有非空白内容，避免产生纯空白重叠
+		if end >= len(runes) || strings.TrimSpace(string(runes[end:])) == "" {
+			return
+		}
+		if !found || priority < best.priority ||
+			(priority == best.priority && start < best.start) {
+			best = boundary{start: start, end: end, priority: priority}
+			found = true
 		}
 	}
 
-	if overlapStart <= 0 {
-		return chunk
+	// 段落分隔 "\n\n"（优先级 1）；标记组成它的换行避免重复按换行（优先级 2）计
+	paragraphRune := make([]bool, len(runes))
+	for i := 0; i+1 < len(runes); i++ {
+		if runes[i] == '\n' && runes[i+1] == '\n' {
+			consider(i, i+2, 1)
+			paragraphRune[i], paragraphRune[i+1] = true, true
+			i++
+		}
+	}
+	// 换行（优先级 2）
+	for i := 0; i < len(runes); i++ {
+		if paragraphRune[i] {
+			continue
+		}
+		if runes[i] == '\n' {
+			consider(i, i+1, 2)
+		}
+	}
+	// 句末标点（优先级 3）：中文句号/感叹/问号单 rune 成界；英文标点需后随空格
+	for i := 0; i < len(runes); i++ {
+		switch runes[i] {
+		case '。', '！', '？':
+			consider(i, i+1, 3)
+		case '.', '!', '?':
+			if i+1 < len(runes) && runes[i+1] == ' ' {
+				consider(i, i+2, 3)
+			}
+		}
 	}
 
-	return string(chunkRunes[overlapStart:])
+	if !found {
+		return ""
+	}
+	overlap := string(runes[best.end:])
+	if strings.TrimSpace(overlap) == "" {
+		return ""
+	}
+	return overlap
 }
 
 // runeSlice 按字符（rune）截取字符串 [start, end)。
@@ -428,18 +628,26 @@ func (s *MarkdownPreservingSplitter) findChunk(text string) (chunk string, rest 
 // 保持原始的 Title、ParentChain、Level、OriginLevel 等元数据不变，仅切分 Content 字段。
 // 使用 MarkdownPreservingSplitter 保护表格和链接不被截断。
 //
+// 子块重叠不取配置值，固定按 chunkSize/5 派生（移植自 WeKnora
+// chunker.DeriveParentChildConfigs 的经验比例：约 20% 子块大小），
+// 且带语义边界门槛——重叠起点必落在句子/段落边界之后。
+//
 // 参数：
 //   - results: 一级分段结果列表
 //   - chunkSize: 每个块的最大字符数（rune 计数）
-//   - chunkOverlap: 相邻块之间的重叠字符数（rune 计数），超过 chunkSize/2 自动调整
+//   - tableSplitThreshold: 表格原子保护单元的最大容忍字符数；超过该值的表格在保护阶段
+//     预切为多张带表头子表。≤ 0 时取默认值 chunkSize
 //   - isTocTitleResult: 是否为"有章节目录组织形式"的内容。
 //     当为 true 时，会设置 ParentIndex 字段，用于标记子块与父块的关联关系
-func SplitLargeBlocks(results []SplitResult, chunkSize, chunkOverlap int, isTocTitleResult bool) []SplitResult {
+func SplitLargeBlocks(results []SplitResult, chunkSize, tableSplitThreshold int, isTocTitleResult bool) []SplitResult {
 	if len(results) == 0 {
 		return results
 	}
 
-	splitter := NewMarkdownPreservingSplitter(chunkSize, chunkOverlap)
+	splitter := NewMarkdownPreservingSplitter(chunkSize, chunkSize/5)
+	if tableSplitThreshold > 0 {
+		splitter.SetTableSplitThreshold(tableSplitThreshold)
+	}
 	var newResults []SplitResult
 	for index, result := range results {
 		// 使用字符数（rune 计数）判断是否需要切分
@@ -454,6 +662,26 @@ func SplitLargeBlocks(results []SplitResult, chunkSize, chunkOverlap int, isTocT
 
 		// 对超长内容块进行二级切分
 		chunks, _ := splitter.SplitText(result.Content)
+
+		//var chunks []string
+		//splitter := textsplitter.NewMarkdownTextSplitter(textsplitter.WithChunkSize(chunkSize), textsplitter.WithChunkOverlap(10),
+		//	textsplitter.WithJoinTableRows(true),
+		//	textsplitter.WithHeadingHierarchy(true),
+		//	textsplitter.WithLenFunc(func(s string) int {
+		//		return utf8.RuneCountInString(s)
+		//	}),
+		//)
+		//docs, err := textsplitter.CreateDocuments(splitter, []string{string(result.Content)}, nil)
+		//if err != nil {
+		//	logx.Error("textsplitter.CreateDocuments error:%v", err)
+		//	continue
+		//}
+		//
+		//for _, item := range docs {
+		//
+		//	chunks = append(chunks, item.PageContent)
+		//}
+
 		for _, chunk := range chunks {
 			chunk = strings.TrimSpace(chunk)
 			if chunk != "" {
