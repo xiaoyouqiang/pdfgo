@@ -3,6 +3,7 @@ package split
 // text_splitter_test.go 覆盖 protectMarkdown 超长表格预切分（每片保留表头）。
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -149,5 +150,108 @@ func TestSplitText_TableIntegrity(t *testing.T) {
 		if found[row] == 0 {
 			t.Fatalf("数据行丢失: %q", row)
 		}
+	}
+}
+
+// ===== 有效长度记账（恢复态预算）=====
+
+// TestEffectivePrefixes_TotalEqualsOriginal 有效前缀表的不变量：
+// 单调非降（超短链接使占位符恢复后变短的场景也被钳制兜住），
+// 有效总长恒等于原文 rune 数。
+func TestEffectivePrefixes_TotalEqualsOriginal(t *testing.T) {
+	s := NewMarkdownPreservingSplitter(150, 30)
+	table := makeTable("| 名称 | 数值 |", []string{makeRow(4), makeRow(4)})
+	text := "开头段落。\n" + table + "结尾有链接 [文档](https://example.com/a) 与正文。\n"
+
+	protected, tableMap, linkMap := s.protectMarkdown(text)
+	eff := s.effectivePrefixes(protected, tableMap, linkMap)
+
+	for i := 1; i < len(eff); i++ {
+		if eff[i] < eff[i-1] {
+			t.Fatalf("eff 在 %d 处回退: %d < %d", i, eff[i], eff[i-1])
+		}
+	}
+	if got, want := eff[len(eff)-1], utf8.RuneCountInString(text); got != want {
+		t.Fatalf("有效总长 %d ≠ 原文长度 %d", got, want)
+	}
+}
+
+// TestSplitText_FragmentsNotStacked 裂分碎片不得堆积回同一块：
+// 占位符恢复后的完整长度计入块预算，每个恢复后的块至多 1 个子表碎片。
+func TestSplitText_FragmentsNotStacked(t *testing.T) {
+	s := NewMarkdownPreservingSplitter(150, 30)
+	rows := make([]string, 0, 20)
+	for i := 0; i < 20; i++ {
+		rows = append(rows, makeRow(4))
+	}
+	table := makeTable("| 名称 | 数值 |", rows) // ≈ 344 rune > 150，裂分为多片
+	text := "前文。\n" + table + "后文。\n"
+
+	chunks, err := s.SplitText(text)
+	if err != nil {
+		t.Fatalf("SplitText: %v", err)
+	}
+	const headerPrefix = "| 名称 | 数值 |\n| --- | --- |\n"
+	headerChunks := 0
+	for ci, chunk := range chunks {
+		if n := strings.Count(chunk, headerPrefix); n > 1 {
+			t.Fatalf("块 %d 堆积了 %d 个子表碎片:\n%s", ci, n, chunk)
+		}
+		if strings.Contains(chunk, headerPrefix) {
+			headerChunks++
+		}
+	}
+	if headerChunks < 2 {
+		t.Fatalf("裂分碎片应分布在多块，实际仅 %d 块含表头", headerChunks)
+	}
+}
+
+// TestSplitText_OversizedHeaderFragmentPerChunk 表头块贴近阈值（修改记录表
+// 的真实形态）：预算装不下第 2 行数据 → 每片=表头+1 行，恢复后每片独占
+// 一块，不与他片同块（单片略超阈值是整表原子性的既定取舍）。
+func TestSplitText_OversizedHeaderFragmentPerChunk(t *testing.T) {
+	s := NewMarkdownPreservingSplitter(200, 40)
+	longHeader := "| " + strings.Repeat("修改章节内容简述中英文混排", 13) + " | 版本 |" // ≈179
+	rows := []string{makeRow(4), makeRow(4), makeRow(4), makeRow(4)}
+	table := makeTable(longHeader, rows) // 表头块 ≈192 < 200 → 每片预算只剩一行
+
+	chunks, err := s.SplitText(table)
+	if err != nil {
+		t.Fatalf("SplitText: %v", err)
+	}
+	frags := 0
+	for ci, chunk := range chunks {
+		if n := strings.Count(chunk, "| --- | --- |"); n > 1 {
+			t.Fatalf("块 %d 含 %d 个子表（碎片堆积）:\n%.200s", ci, n, chunk)
+		}
+		if strings.Contains(chunk, "| --- | --- |") {
+			frags++
+		}
+	}
+	if frags != len(rows) {
+		t.Fatalf("期望 %d 个碎片各自成块，实际 %d 块含子表", len(rows), frags)
+	}
+}
+
+// TestSplitText_NoGiantTail 循环耗尽估算块数后，剩余内容有效长度仍超过
+// 一个块预算时必须继续切，尾块不得超出预算（消除巨尾块）。
+func TestSplitText_NoGiantTail(t *testing.T) {
+	s := NewMarkdownPreservingSplitter(384, 76)
+	var b strings.Builder
+	// 行长 ≈ 249：切点稳定落在窗口下沿附近，每轮消耗 ≈ 250 < effectiveSize=308，
+	// 旧逻辑在此形态下会留下数千 rune 的巨尾块
+	line := "| " + strings.Repeat("字", 244) + " |"
+	for i := 0; i < 40; i++ {
+		fmt.Fprintf(&b, "%s\n", line)
+	}
+	chunks, err := s.SplitText(b.String())
+	if err != nil {
+		t.Fatalf("SplitText: %v", err)
+	}
+	if len(chunks) < 30 {
+		t.Fatalf("10000 rune 文本应切出约 33 块，实际 %d 块", len(chunks))
+	}
+	if n := utf8.RuneCountInString(chunks[len(chunks)-1]); n > 384 {
+		t.Fatalf("尾块 %d rune 超过预算 384（巨尾块）", n)
 	}
 }

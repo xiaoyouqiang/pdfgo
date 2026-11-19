@@ -12,6 +12,7 @@ package split
 import (
 	"fmt"
 	"regexp"
+	"sort"
 	"strings"
 	"unicode/utf8"
 )
@@ -61,9 +62,7 @@ func NewMarkdownPreservingSplitter(chunkSize, chunkOverlap int) *MarkdownPreserv
 			"\n",   // 换行符
 			"。",    // 中文句号
 			"！",    // 中文感叹号
-			"！",    // 中文感叹号加空格
 			"？",    // 中文问号
-			"？",    // 中文问号加空格
 			";",    // 英文分号加空格
 			"；",    // 中文分号
 			".",    // 英文句号加空格
@@ -111,7 +110,7 @@ func (s *MarkdownPreservingSplitter) SplitText(text string) ([]string, error) {
 		// 边界处分开，恢复后每个块的真实长度尽量 ≤ chunkSize。
 		chunks = s.packProtectedLines(protected, tableMap, linkMap)
 	} else {
-		chunks = s.splitProtectedText(protected, originalLen)
+		chunks = s.splitProtectedText(protected, originalLen, tableMap, linkMap)
 	}
 
 	// 恢复阶段：将占位符替换回原始的表格和链接内容
@@ -286,25 +285,71 @@ func (s *MarkdownPreservingSplitter) restoreMarkdown(chunks []string, tableMap, 
 	return result
 }
 
+// effectivePrefixes 计算保护文本每个 rune 前缀位置 i 的「恢复态有效长度」：
+// eff[i] = protected[0:i] 恢复占位符后的 rune 数。
+// 占位符内部不膨胀（切分不会落在其内部），占位符结束后一次性加上
+// (恢复内容长度 - 占位符长度)。占位符恢复后反而变短的极端情况（超短链接）
+// 会使 eff 局部回退，最后统一钳制成非降序列以保证二分查找可用。
+// 全文有效总长 eff[n] 恒等于原文 rune 数。
+func (s *MarkdownPreservingSplitter) effectivePrefixes(text string, tableMap, linkMap map[string]string) []int {
+	runes := []rune(text)
+	n := len(runes)
+	eff := make([]int, n+1)
+	for i := range eff {
+		eff[i] = i
+	}
+	for _, rng := range s.findPlaceholderRanges(text) {
+		ph := string(runes[rng[0]:rng[1]])
+		restored, ok := tableMap[ph]
+		if !ok {
+			restored, ok = linkMap[ph]
+		}
+		if !ok {
+			continue
+		}
+		delta := utf8.RuneCountInString(restored) - (rng[1] - rng[0])
+		for i := rng[1]; i <= n; i++ {
+			eff[i] += delta
+		}
+	}
+	for i := 1; i <= n; i++ {
+		if eff[i] < eff[i-1] {
+			eff[i] = eff[i-1]
+		}
+	}
+	return eff
+}
+
+// locateEffPos 在有效长度前缀表上二分查找最小的 rune 位置 i 使 eff[i] >= target。
+// target 超过全文有效长度时返回 n-1（末位置）。
+func locateEffPos(eff []int, target int) int {
+	i := sort.Search(len(eff), func(i int) bool { return eff[i] >= target })
+	if i >= len(eff) {
+		return len(eff) - 1
+	}
+	return i
+}
+
 // splitProtectedText 对保护后的文本进行切分。
 //
-// 使用 originalLen（保护前的原始文本长度）来估算最少需要切分的块数，
-// 因为保护后的文本中占位符比原始内容短，不能直接用保护后文本长度计算。
+// 切点的预算按「恢复态有效长度」记账（见 effectivePrefixes）：表格/链接
+// 占位符虽只占 11 个 rune，但其恢复后的完整内容计入所在块的预算，
+// 保证恢复后的块长不超过 chunkSize（整表原子性优先的既定取舍除外）。
 //
 // 重叠机制（语义边界门槛）：
 //
 //	每块切出后，仅当块尾 chunkOverlap 窗口内存在语义边界（段落 > 换行 >
 //	句末标点）时，下一块 = 边界之后的重叠尾巴 + 剩余文本；找不到语义
-//	边界则下一块直接从剩余文本开始（零重叠）。
-//	重叠起点因此必在句子/段落边界之后，不会落在句子中间。
+//	边界（或尾巴含占位符，恢复后会整表复制）则零重叠。
 //
 // 切分策略：
-//  1. 计算最少需要的块数（ceil(原始长度 / (chunkSize - chunkOverlap))）
-//  2. 循环调用 findChunk 找到每个切分点
+//  1. 估算最少块数 ceil(原文长度 / (chunkSize - chunkOverlap))
+//  2. 循环调用 findChunk 找到每个切分点；当已切块数达到估算值但剩余
+//     内容有效长度仍超过一个块预算时继续切（消除巨尾块）
 //  3. 应用重叠：仅当块尾存在语义边界时叠加重叠前缀
-//  4. 如果 findChunk 返回空（极端情况），回退到固定长度切分
-//  5. 剩余内容作为最后一个块
-func (s *MarkdownPreservingSplitter) splitProtectedText(text string, originalLen int) []string {
+//  4. 如果 findChunk 返回空（极端情况），回退到有效长度空间的固定切分
+//  5. 剩余内容有效长度 ≤ chunkSize 时作为最后一个块
+func (s *MarkdownPreservingSplitter) splitProtectedText(text string, originalLen int, tableMap, linkMap map[string]string) []string {
 	// 文本已经足够短，无需切分
 	if originalLen <= s.chunkSize {
 		return []string{text}
@@ -318,24 +363,34 @@ func (s *MarkdownPreservingSplitter) splitProtectedText(text string, originalLen
 	if effectiveSize <= 0 {
 		effectiveSize = 1
 	}
-	// 向上取整计算最少块数
+	// 向上取整估算最少块数（保护文本的有效总长恒等于原文长度）
 	minChunks := (originalLen + effectiveSize - 1) / effectiveSize
-	// 用保护后文本的实际长度约束 minChunks 上限
-	// 避免原始文本中大量表格/链接被替换为短占位符后，minChunks 远超实际需要的块数
-	protectedLen := utf8.RuneCountInString(text)
-	if protectedLen > 0 {
-		maxPossibleChunks := (protectedLen + effectiveSize - 1) / effectiveSize
-		if minChunks > maxPossibleChunks {
-			minChunks = maxPossibleChunks
-		}
+
+	// remaining 的恢复态有效长度
+	remainingEff := func(txt string) int {
+		eff := s.effectivePrefixes(txt, tableMap, linkMap)
+		return eff[len(eff)-1]
 	}
 
-	for len(chunks) < minChunks && remaining != "" {
-		chunk, rest := s.findChunk(remaining)
+	// 循环条件：已切块数未达估算值，或剩余内容有效长度仍超过一个块预算
+	//（后者保证尾块不会超出预算，避免巨尾块）
+	for remaining != "" && (len(chunks) < minChunks || remainingEff(remaining) > s.chunkSize) {
+		chunk, rest := s.findChunk(remaining, tableMap, linkMap)
 		if chunk == "" {
-			// 回退策略：直接取前 chunkSize 个字符
-			chunk = runeSlice(remaining, 0, s.chunkSize)
-			rest = runeSliceFrom(remaining, s.chunkSize)
+			// 回退策略：在有效长度空间取前 chunkSize（防御路径，findChunk 正常不返回空）
+			remainingRunes := []rune(remaining)
+			eff := s.effectivePrefixes(remaining, tableMap, linkMap)
+			pos := locateEffPos(eff, s.chunkSize)
+			for _, r := range s.findPlaceholderRanges(remaining) {
+				if pos > r[0] && pos < r[1] {
+					pos = r[1]
+				}
+			}
+			if pos > len(remainingRunes) {
+				pos = len(remainingRunes)
+			}
+			chunk = string(remainingRunes[:pos])
+			rest = string(remainingRunes[pos:])
 		}
 
 		chunks = append(chunks, chunk)
@@ -358,7 +413,7 @@ func (s *MarkdownPreservingSplitter) splitProtectedText(text string, originalLen
 		}
 	}
 
-	// 将剩余内容作为最后一个块
+	// 将剩余内容作为最后一个块（此时有效长度必 ≤ chunkSize）
 	if remaining != "" {
 		chunks = append(chunks, remaining)
 	}
@@ -455,6 +510,13 @@ func (s *MarkdownPreservingSplitter) semanticOverlap(chunk string) string {
 	if !found {
 		return ""
 	}
+	// 重叠尾巴内不得含占位符：恢复后会把整表/整链接复制进下一块前缀，
+	// 挤占下一块的有效预算
+	for _, rng := range placeholderRanges {
+		if rng[0] >= best.end {
+			return ""
+		}
+	}
 	overlap := string(runes[best.end:])
 	if strings.TrimSpace(overlap) == "" {
 		return ""
@@ -525,44 +587,51 @@ func isPositionInPlaceholder(pos int, ranges [][]int) bool {
 
 // findChunk 从文本中找到一个合适大小的块和剩余部分。
 //
+// 切点的预算按「恢复态有效长度」记账：占位符恢复后的完整内容计入所在块，
+// searchEnd（切点上限）与回溯下限均在有效长度空间定位，保证恢复后的
+// 块长不超过 chunkSize（整表原子性优先的既定取舍除外）。
+//
 // 切分策略（按优先级）：
-//  1. 在 chunkSize 附近向后搜索（到 chunkSize/2），查找匹配的分隔符
+//  1. 在有效长度达到 chunkSize 的位置附近向前回溯（到有效长度一半），
+//     查找匹配的分隔符
 //  2. 跳过占位符内部的位置，确保不破坏表格/链接占位符
 //  3. 如果找不到合适的分隔符，尝试在空格或换行处切分（单词边界）
-//  4. 最终回退：直接在 chunkSize 处切分（确保不切在占位符内部）
+//  4. 最终回退：直接在 searchEnd 处切分（确保不切在占位符内部）
 //
 // 返回值：
 //   - chunk: 切分出的文本块
 //   - rest: 剩余的文本
-func (s *MarkdownPreservingSplitter) findChunk(text string) (chunk string, rest string) {
+func (s *MarkdownPreservingSplitter) findChunk(text string, tableMap, linkMap map[string]string) (chunk string, rest string) {
 	textRunes := []rune(text)
 	textLen := len(textRunes)
 
-	// 文本已经足够短，直接返回全部
-	if textLen <= s.chunkSize {
+	// 全文恢复态有效长度不超过块预算，直接返回全部
+	eff := s.effectivePrefixes(text, tableMap, linkMap)
+	if eff[textLen] <= s.chunkSize {
 		return text, ""
 	}
 
 	// 查找占位符范围，避免在占位符内部切分
 	placeholderRanges := s.findPlaceholderRanges(text)
 
-	searchEnd := s.chunkSize
-
-	// 如果切分点 searchEnd 落在占位符内部，调整到占位符末尾
+	// searchEnd：有效长度首次达到 chunkSize 的位置；落在占位符内部则推到占位符末尾
+	searchEnd := locateEffPos(eff, s.chunkSize)
 	for _, r := range placeholderRanges {
 		if searchEnd > r[0] && searchEnd < r[1] {
 			searchEnd = r[1]
 		}
 	}
+	// floorPos：有效长度达到 chunkSize/2 的位置（回溯不少于半个预算）
+	floorPos := locateEffPos(eff, s.chunkSize/2)
 
-	// 策略一：按分隔符优先级，从 searchEnd 向前搜索到 searchEnd/2
+	// 策略一：按分隔符优先级，从 searchEnd 向前搜索到 floorPos
 	// 寻找最佳的自然断句点
 	for _, sep := range s.separators {
 		sepRunes := []rune(sep)
 		sepLen := len(sepRunes)
 
-		// 从 searchEnd 向前搜索到 searchEnd/2，寻找分隔符
-		for i := searchEnd - sepLen; i >= searchEnd/2; i-- {
+		// 从 searchEnd 向前搜索到 floorPos，寻找分隔符
+		for i := searchEnd - sepLen; i >= floorPos; i-- {
 			// 跳过占位符内部的位置
 			if isPositionInPlaceholder(i, placeholderRanges) {
 				continue
@@ -590,7 +659,7 @@ func (s *MarkdownPreservingSplitter) findChunk(text string) (chunk string, rest 
 
 	// 策略二：未找到分隔符，尝试在单词边界（空格或换行）处切分
 	chunkEnd := searchEnd
-	for i := searchEnd - 1; i >= searchEnd/2 && i < textLen; i-- {
+	for i := searchEnd - 1; i >= floorPos && i < textLen; i-- {
 		// 跳过占位符内部的位置
 		if isPositionInPlaceholder(i, placeholderRanges) {
 			continue
@@ -602,7 +671,7 @@ func (s *MarkdownPreservingSplitter) findChunk(text string) (chunk string, rest 
 		}
 	}
 
-	if chunkEnd >= searchEnd/2 && chunkEnd < searchEnd && chunkEnd < textLen {
+	if chunkEnd >= floorPos && chunkEnd < searchEnd && chunkEnd < textLen {
 		return string(textRunes[:chunkEnd]), string(textRunes[chunkEnd:])
 	}
 
